@@ -36,6 +36,7 @@ export const siteConfig = {
     { label: "Accueil", href: "/" },
     { label: "Offres", href: "/offres" },
     { label: "À propos", href: "/a-propos" },
+    { label: "Discussion", href: "/discussion" },
   ],
 
   /** Lien de connexion (isolé du reste de la nav, style bouton). */

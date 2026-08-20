@@ -41,10 +41,13 @@ app/
   offres/                 Les deux offres, le programme et la FAQ
   a-propos/               Parcours du fondateur
   connexion/              Espace membre (à venir)
+  discussion/             Formulaire de contact + accès Discord réservé
   mentions-legales/       ⚠️ vide — à rédiger
   cgu/                    ⚠️ vide — à rédiger
   icon.tsx                Favicon généré depuis siteConfig.name
 components/               Header, footer, thème, témoignages, UI partagée
+lib/
+  entitlements.ts         ⚠️ Contrôle d'accès à l'offre Accompagnement
 config/
   site.ts                 ⭐ Nom du projet et configuration générale
   offers.ts               Tarifs, bénéfices et modules de la formation
@@ -76,6 +79,54 @@ Toggle dans le header, préférence enregistrée dans `localStorage`. Par défau
 site suit la préférence système, jusqu'à un premier choix manuel. Un script
 inline (`components/theme-provider.tsx`) applique le thème avant le rendu pour
 éviter tout flash au chargement.
+
+## Page /discussion — contact et accès réservé
+
+La page contient deux blocs indépendants.
+
+**1. Formulaire de contact — visible par tous.** Nom, e-mail, message, traité
+par une Server Action (`app/discussion/actions.ts`) qui envoie un e-mail via
+Resend. Validation côté serveur, pot de miel anti-robots, et l'adresse du
+visiteur placée en `reply_to` (jamais en expéditeur, pour ne pas casser
+SPF/DMARC). Sans `RESEND_API_KEY`, le formulaire s'affiche et invite à écrire
+directement à l'adresse de contact.
+
+**2. Accès Discord — membres Accompagnement uniquement.** Voir ci-dessous.
+
+### ⚠️ Comment l'accès Discord est protégé
+
+`lib/entitlements.ts` est le **seul** point de décision. Trois garde-fous :
+
+1. **Décision côté serveur.** La page est un Server Component et le module est
+   marqué `server-only` : le build échoue s'il est importé depuis un composant
+   client. Le navigateur ne participe jamais à la décision.
+2. **Le lien ne quitte le serveur que si l'accès est accordé.**
+   `process.env.DISCORD_INVITE_URL` n'est lu qu'à l'intérieur de la branche
+   autorisée. Pour un visiteur non autorisé, l'URL n'apparaît nulle part dans
+   la réponse — ni HTML, ni bundle JS, ni payload React. Ne jamais renommer
+   cette variable en `NEXT_PUBLIC_*` : elle deviendrait publique.
+3. **Refus par défaut.** Il faut être authentifié **et** avoir l'Accompagnement.
+   Tout autre cas est refusé, y compris les acheteurs de la seule Formation.
+
+**État actuel : personne n'a accès.** Il n'existe ni authentification, ni base
+de données, ni Stripe — `getViewer()` ne peut identifier personne et renvoie un
+visiteur anonyme. C'est volontaire : mieux vaut refuser tout le monde
+qu'ouvrir à tort. Les emplacements à brancher (session, puis lecture des achats
+en base alimentée par le webhook Stripe) sont documentés dans le fichier.
+
+### Prévisualiser la vue membre
+
+```bash
+DEV_PREVIEW_ENTITLEMENT=accompagnement npm run dev
+```
+
+Simule un compte ayant acheté l'offre. **Sans aucun effet en production**
+(neutralisé dès que `NODE_ENV=production`, ce qui est le cas sur Vercel).
+
+## Variables d'environnement
+
+Voir [`.env.example`](.env.example). Aucune n'est requise pour lancer le site ;
+elles activent l'envoi d'e-mail et l'accès Discord.
 
 ## Paiements
 
