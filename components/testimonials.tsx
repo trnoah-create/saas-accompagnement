@@ -18,7 +18,7 @@ type Testimonial = {
 const testimonials: Testimonial[] = [
   {
     quote:
-      "On a vraiment été bien aidés grâce à Noah, je le remercie sincèrement. Je vous conseille d'aller vers lui si vous avez besoin d'aide au niveau des SaaS, il nous a tout expliqué, vous pouvez y aller les yeux fermés !",
+      "On a vraiment été bien aidés grâce à Noah, on le remercie sincèrement. Je vous conseille d'aller vers lui si vous avez besoin d'aide au niveau des SaaS, il nous a tout expliqué, vous pouvez y aller les yeux fermés !",
     author: "Adam et Redouane",
   },
 ];
