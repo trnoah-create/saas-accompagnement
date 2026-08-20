@@ -55,7 +55,7 @@ export default function HomePage() {
           </h1>
 
           <p className="animate-fade-up mx-auto mt-6 max-w-2xl text-lg leading-relaxed text-slate-600 sm:text-xl dark:text-slate-400">
-            De l&apos;idée au premier client payant : la méthode complète, les
+            De l&apos;idée au premier client : la méthode complète, les
             outils, et un accompagnement personnalisé par quelqu&apos;un qui l&apos;a
             déjà fait — pas quelqu&apos;un qui en parle.
           </p>

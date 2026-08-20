@@ -23,7 +23,7 @@ export const offers: Offer[] = [
     priceSuffix: "",
     billingNote: "Paiement unique · Accès à vie",
     tagline:
-      "Tout le processus, de l'idée au premier client payant. Accessible immédiatement après l'achat.",
+      "Tout le processus, de l'idée au premier client. Accessible immédiatement après l'achat.",
     featured: false,
     ctaLabel: "Accéder à la formation",
     features: [
