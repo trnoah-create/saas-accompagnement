@@ -13,7 +13,7 @@ export const siteConfig = {
   name: "MonProjet",
 
   /** Slogan court, affiché sous le logo dans le footer. */
-  tagline: "Lance ton SaaS, de l'idée au premier client payant.",
+  tagline: "Lance ton SaaS, de l'idée au premier client.",
 
   /** Description utilisée pour le SEO et les partages sur les réseaux. */
   description:
