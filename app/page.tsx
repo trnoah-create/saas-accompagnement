@@ -5,26 +5,26 @@ import { siteConfig } from "@/config/site";
 const journey = [
   {
     step: "01",
-    title: "Lancé en no-code",
-    description: `${siteConfig.flagshipProduct} est né sans une ligne de code. Un produit vendable en quelques semaines, validé par de vrais clients avant d'investir dans la technique.`,
+    title: "Construit de mes mains",
+    description: `${siteConfig.flagshipProduct}, je l'ai codé moi-même, de la première ligne jusqu'à la mise en production. Chaque choix technique, je l'ai fait, assumé, et parfois payé.`,
   },
   {
     step: "02",
-    title: "Migré vers du code",
+    title: "Ce que ça coûte vraiment",
     description:
-      "Une fois la traction là, j'ai reconstruit le produit sur une vraie stack technique — sans interrompre le service ni perdre un seul utilisateur.",
+      "Le temps que ça prend réellement, le budget que ça demande, les impasses dans lesquelles on s'engage sans le voir. Je te donne les vrais chiffres et les arbitrages, pas une estimation optimiste.",
   },
   {
     step: "03",
-    title: "Rendu rentable",
+    title: "Les difficultés, sans filtre",
     description:
-      "Acquisition, pricing, churn, support : j'ai fait les erreurs et trouvé ce qui marche. C'est exactement ce que je transmets aujourd'hui.",
+      "Les blocages techniques, les semaines où rien n'avance, les décisions qu'on repousse. Tu sauras à quoi t'attendre et comment passer au travers — parce que je suis passé par là.",
   },
 ];
 
 const highlights = [
   "Un SaaS réellement lancé, pas de la théorie",
-  "Le no-code et le code, les deux versants du métier",
+  "Un produit codé et mis en production de bout en bout",
   "Des méthodes testées sur un produit qui tourne",
 ];
 
@@ -92,17 +92,18 @@ export default function HomePage() {
               <SectionHeading
                 eyebrow="Pourquoi moi"
                 title={`J'ai construit ${siteConfig.flagshipProduct}, et je sais ce que ça coûte.`}
-                description={`Je ne t'apprends pas à lancer un SaaS depuis un cours théorique. Je te transmets ce que j'ai appris en lançant ${siteConfig.flagshipProduct} : d'abord en no-code, puis en le migrant vers du code une fois les premiers clients acquis.`}
+                description={`Je ne t'apprends pas à lancer un SaaS depuis un cours théorique. Je te transmets ce que j'ai appris en construisant ${siteConfig.flagshipProduct} moi-même : le temps que ça prend, ce que ça coûte, et les difficultés qu'on ne découvre qu'une fois dedans.`}
               />
 
               <div className="mt-8 rounded-2xl border border-slate-200 bg-slate-50/60 p-6 dark:border-slate-800 dark:bg-slate-900/40">
                 <p className="text-sm leading-relaxed text-slate-600 dark:text-slate-400">
-                  La plupart des créateurs bloquent au même endroit : ils passent
-                  des mois à construire un produit que personne n&apos;attend, ou
-                  ils n&apos;osent pas commencer faute de savoir coder.{" "}
+                  La plupart des créateurs ne se trompent pas sur leur idée : ils
+                  se trompent sur ce qu&apos;il faut réellement tenir pour la mener
+                  jusqu&apos;à un produit qui tourne — le temps, le budget, et les
+                  moments où plus rien n&apos;avance.{" "}
                   <span className="font-medium text-slate-900 dark:text-white">
-                    Les deux problèmes ont la même solution : sortir vite, valider,
-                    puis solidifier.
+                    Savoir à l&apos;avance ce que ça demande, c&apos;est ce qui fait
+                    la différence entre un projet abandonné et un SaaS lancé.
                   </span>
                 </p>
               </div>
