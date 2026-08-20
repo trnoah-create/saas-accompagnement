@@ -1,25 +1,34 @@
 import { SectionHeading } from "./ui";
 
 /**
- * Témoignages — section volontairement vide pour l'instant.
+ * Témoignages.
  *
- * Pour l'activer : ajouter des entrées dans le tableau `testimonials`
- * ci-dessous. La section bascule automatiquement du placeholder
- * vers la grille de témoignages dès qu'il y en a au moins un.
+ * Pour en ajouter un : compléter le tableau `testimonials` ci-dessous.
+ * La mise en page s'adapte au nombre d'entrées, et la section revient
+ * automatiquement au placeholder si le tableau est vidé.
+ *
+ * `role` est facultatif : ne le renseigner que s'il est exact.
  */
 type Testimonial = {
   quote: string;
   author: string;
-  role: string;
+  role?: string;
 };
 
 const testimonials: Testimonial[] = [
-  // {
-  //   quote: "…",
-  //   author: "Prénom Nom",
-  //   role: "Fondateur de …",
-  // },
+  {
+    quote:
+      "On a vraiment été bien aidés grâce à Noah, je le remercie sincèrement. Je vous conseille d'aller vers lui si vous avez besoin d'aide au niveau des SaaS, il nous a tout expliqué, vous pouvez y aller les yeux fermés !",
+    author: "Adam",
+  },
 ];
+
+/** La grille reste équilibrée quel que soit le nombre de témoignages. */
+function gridClass(count: number): string {
+  if (count === 1) return "mx-auto max-w-2xl";
+  if (count === 2) return "mx-auto max-w-4xl sm:grid-cols-2";
+  return "sm:grid-cols-2 lg:grid-cols-3";
+}
 
 export function Testimonials() {
   return (
@@ -29,7 +38,7 @@ export function Testimonials() {
           centered
           eyebrow="Témoignages"
           title="Ils sont passés de l'idée au produit"
-          description="Les premiers retours d'accompagnement arriveront bientôt ici."
+          description="Ce que disent les personnes que j'ai accompagnées."
         />
 
         {testimonials.length === 0 ? (
@@ -62,7 +71,7 @@ export function Testimonials() {
             </p>
           </div>
         ) : (
-          <div className="mt-14 grid gap-6 md:grid-cols-3">
+          <div className={`mt-14 grid gap-6 ${gridClass(testimonials.length)}`}>
             {testimonials.map((testimonial) => (
               <figure
                 key={testimonial.author}
@@ -75,9 +84,11 @@ export function Testimonials() {
                   <div className="font-semibold text-slate-900 dark:text-white">
                     {testimonial.author}
                   </div>
-                  <div className="text-slate-500 dark:text-slate-500">
-                    {testimonial.role}
-                  </div>
+                  {testimonial.role && (
+                    <div className="text-slate-500 dark:text-slate-500">
+                      {testimonial.role}
+                    </div>
+                  )}
                 </figcaption>
               </figure>
             ))}
