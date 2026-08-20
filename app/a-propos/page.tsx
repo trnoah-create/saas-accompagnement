@@ -5,7 +5,7 @@ import { siteConfig } from "@/config/site";
 
 export const metadata: Metadata = {
   title: "À propos",
-  description: `Le parcours derrière ${siteConfig.name} : la création de ${siteConfig.flagshipProduct}, du no-code au code.`,
+  description: `Le parcours derrière ${siteConfig.name} : la création de ${siteConfig.flagshipProduct}, construit de zéro avec l'IA.`,
 };
 
 export default function AProposPage() {
@@ -20,24 +20,28 @@ export default function AProposPage() {
           <strong className="font-semibold text-slate-900 dark:text-white">
             {siteConfig.flagshipProduct}
           </strong>
-          , un SaaS que j&apos;ai lancé en no-code avant de le migrer vers du code.
-          Ce chemin — sortir vite un produit imparfait, le confronter à de vrais
-          clients, puis le solidifier techniquement — est celui que je recommande
-          aujourd&apos;hui à la majorité des créateurs.
+          , un SaaS que j&apos;ai construit de zéro avec l&apos;aide de
+          l&apos;IA — {siteConfig.aiTool} — dès la première ligne. Pas de no-code,
+          pas d&apos;équipe technique : un vrai produit, codé, déployé et mis
+          entre les mains de clients payants.
         </p>
         <p>
-          Le no-code m&apos;a permis de valider une demande réelle en quelques
-          semaines au lieu de plusieurs mois. La migration vers du code est venue
-          après, quand le produit avait des utilisateurs, des revenus, et des
-          limites claires à dépasser. Faire l&apos;inverse — coder pendant un an un
-          produit que personne n&apos;a demandé — est l&apos;erreur la plus
-          coûteuse que je vois se répéter.
+          C&apos;est ce qui a tout changé pour moi, et c&apos;est ce qui rend la
+          création d&apos;un SaaS accessible aujourd&apos;hui à quelqu&apos;un qui
+          n&apos;a pas un parcours d&apos;ingénieur. Mais je ne vais pas te vendre
+          du rêve : l&apos;IA écrit l&apos;essentiel du code, elle ne décide pas à
+          ta place. C&apos;est toi qui définis ce que tu construis, qui arbitres,
+          qui relis ce qu&apos;elle produit et qui tranches quand ça part de
+          travers. Savoir la piloter, c&apos;est un vrai savoir-faire — et ça
+          s&apos;apprend.
         </p>
         <p>
-          Ce que je transmets ici, ce sont les décisions concrètes de ce parcours :
-          comment valider une idée, quoi construire en premier, quand quitter le
-          no-code, comment fixer ses prix, et où trouver ses premiers clients
-          payants.
+          Ce que je transmets ici, ce sont les décisions concrètes de ce
+          parcours : comment valider une idée, quoi construire en premier,
+          comment faire travailler l&apos;IA sur ton projet sans perdre le
+          contrôle, comment déployer et encaisser la montée en charge, comment
+          fixer ses prix et où trouver ses premiers clients payants. Avec le temps
+          que ça prend réellement et ce que ça coûte.
         </p>
       </div>
 

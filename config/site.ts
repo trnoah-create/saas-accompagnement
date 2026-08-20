@@ -17,7 +17,7 @@ export const siteConfig = {
 
   /** Description utilisée pour le SEO et les partages sur les réseaux. */
   description:
-    "Formation et accompagnement personnalisé pour créer, lancer et faire décoller ton propre SaaS — même en partant de zéro.",
+    "Formation et accompagnement personnalisé pour créer, lancer et faire décoller ton propre SaaS avec l'IA — même en partant de zéro.",
 
   /** URL de production (à mettre à jour après le déploiement Vercel). */
   url: "https://monprojet.vercel.app",
@@ -27,6 +27,9 @@ export const siteConfig = {
 
   /** Le SaaS de référence du fondateur, cité dans la section « Pourquoi moi ». */
   flagshipProduct: "Ventify",
+
+  /** L'outil d'IA avec lequel le produit a été construit, cité dans les contenus. */
+  aiTool: "Claude Code",
 
   /** Navigation principale du header. */
   nav: [

@@ -29,7 +29,7 @@ export const offers: Offer[] = [
     features: [
       "Accès immédiat à l'intégralité des modules",
       "Accès à vie, mises à jour incluses",
-      "Templates, checklists et scripts prêts à l'emploi",
+      "Prompts, templates et checklists prêts à l'emploi",
       "Études de cas réelles issues de " + siteConfig.flagshipProduct,
       "À suivre à ton rythme, sans échéance",
     ],
@@ -45,14 +45,13 @@ export const offers: Offer[] = [
           "Réduire le périmètre à l'essentiel, définir le parcours utilisateur et poser une roadmap tenable.",
       },
       {
-        title: "3 · Construire en no-code",
-        description:
-          "Assembler un produit fonctionnel et vendable en quelques semaines, sans équipe technique.",
+        title: "3 · Construire avec l'IA",
+        description: `Faire travailler ${siteConfig.aiTool} sur ton projet : cadrer ce que tu veux, structurer le code, relire et corriger ce qu'il produit. Passer d'une page blanche à un produit qui tourne.`,
       },
       {
-        title: "4 · Migrer vers du code",
+        title: "4 · Déployer et scaler",
         description:
-          "Savoir quand et comment sortir du no-code, choisir sa stack et migrer sans casser l'existant.",
+          "Mettre en ligne, brancher la base de données et l'authentification, encaisser les premiers utilisateurs — en gardant l'IA comme copilote sur la technique.",
       },
       {
         title: "5 · Paiements et abonnements",

@@ -5,8 +5,8 @@ import { siteConfig } from "@/config/site";
 const journey = [
   {
     step: "01",
-    title: "Construit de mes mains",
-    description: `${siteConfig.flagshipProduct}, je l'ai codé moi-même, de la première ligne jusqu'à la mise en production. Chaque choix technique, je l'ai fait, assumé, et parfois payé.`,
+    title: "Construit de zéro, avec l'IA",
+    description: `${siteConfig.flagshipProduct}, je l'ai construit moi-même avec ${siteConfig.aiTool}, de la première ligne jusqu'à la mise en production. L'IA a écrit l'essentiel du code — les décisions, je les ai prises, assumées, et parfois payées.`,
   },
   {
     step: "02",
@@ -92,7 +92,7 @@ export default function HomePage() {
               <SectionHeading
                 eyebrow="Pourquoi moi"
                 title={`J'ai construit ${siteConfig.flagshipProduct}, et je sais ce que ça coûte.`}
-                description={`Je ne t'apprends pas à lancer un SaaS depuis un cours théorique. Je te transmets ce que j'ai appris en construisant ${siteConfig.flagshipProduct} moi-même : le temps que ça prend, ce que ça coûte, et les difficultés qu'on ne découvre qu'une fois dedans.`}
+                description={`Je ne t'apprends pas à lancer un SaaS depuis un cours théorique. Je te transmets ce que j'ai appris en construisant ${siteConfig.flagshipProduct} de zéro avec l'IA : le temps que ça prend, ce que ça coûte, et les difficultés qu'on ne découvre qu'une fois dedans.`}
               />
 
               <div className="mt-8 rounded-2xl border border-slate-200 bg-slate-50/60 p-6 dark:border-slate-800 dark:bg-slate-900/40">

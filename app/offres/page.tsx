@@ -23,7 +23,7 @@ const faq = [
   {
     question: "Faut-il savoir coder pour commencer ?",
     answer:
-      "Non. La méthode commence en no-code, justement pour que tu puisses sortir un produit vendable sans compétence technique. Le passage au code est traité plus tard, quand il devient utile.",
+      "Non, et c'est précisément ce qui a changé ces dernières années : l'IA prend en charge la plus grande partie du travail technique, c'est elle qui écrit l'essentiel du code. Ce n'est pas du no-code, c'est un vrai produit codé — mais tu n'as pas besoin de savoir l'écrire toi-même. En revanche tu restes aux commandes : comprendre ce que tu construis, arbitrer, relire ce que l'IA produit. La formation t'apprend exactement ça.",
   },
   {
     question: "Combien de temps faut-il y consacrer ?",
