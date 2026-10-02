@@ -1,75 +1,184 @@
 /**
- * Téléchargement des prix réels. Deux sources gratuites, sans clé API :
- *   - Binance (crypto)  : /api/v3/klines
- *   - Stooq  (SPY)      : export CSV
+ * Enchaînement des sources de prix.
  *
- * Si le réseau est bloqué (pare-feu, hors-ligne), ces fonctions lèvent une
- * erreur et l'appelant bascule sur les données de démonstration.
+ * On essaie chaque source dans l'ordre et on note précisément ce qui s'est
+ * passé pour chacune : code HTTP, message, délai dépassé, durée. Ces traces
+ * alimentent la page /diagnostic.
  */
-import "server-only";
 import type { Asset } from "./assets";
-import type { Bar } from "./types";
+import { sourcesPour, type Source } from "./sources";
+import type { Bar, Tentative } from "./types";
 
-const TIMEOUT_MS = 15_000;
+const TIMEOUT_MS = 12_000;
+const MIN_BARS = 10;
 
-async function fetchWithTimeout(url: string): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+export type Recolte = {
+  bars: Bar[];
+  source: string;
+  sourceLabel: string;
+  ohlc: boolean;
+  note?: string;
+  tentatives: Tentative[];
+};
+
+/** Permet aux tests d'injecter des réponses sans réseau. */
+export type FetchLike = (
+  url: string,
+  init: { signal: AbortSignal; headers?: Record<string, string> },
+) => Promise<{ ok: boolean; status: number; text: () => Promise<string> }>;
+
+function hoteDe(url: string): string {
   try {
-    return await fetch(url, { signal: controller.signal, cache: "no-store" });
-  } finally {
-    clearTimeout(timer);
+    return new URL(url).hostname;
+  } catch {
+    return "adresse invalide";
   }
 }
 
-async function fromBinance(symbol: string, days: number): Promise<Bar[]> {
-  const limit = Math.min(days, 1000);
-  const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1d&limit=${limit}`;
-  const res = await fetchWithTimeout(url);
-  if (!res.ok) throw new Error(`Binance a répondu ${res.status}`);
-
-  const rows = (await res.json()) as unknown[][];
-  return rows.map((r) => ({
-    day: new Date(Number(r[0])).toISOString().slice(0, 10),
-    open: Number(r[1]),
-    high: Number(r[2]),
-    low: Number(r[3]),
-    close: Number(r[4]),
-  }));
+/** Message court et lisible, sans jamais recopier de secret. */
+function messageErreur(e: unknown): string {
+  if (e instanceof Error) {
+    if (e.name === "AbortError" || /abort/i.test(e.message)) {
+      return `délai dépassé (${TIMEOUT_MS / 1000} s sans réponse)`;
+    }
+    if (/fetch failed|ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(e.message)) {
+      return `connexion impossible (${e.message})`;
+    }
+    return e.message;
+  }
+  return String(e);
 }
 
-async function fromStooq(symbol: string, days: number): Promise<Bar[]> {
-  const url = `https://stooq.com/q/d/l/?s=${symbol}&i=d`;
-  const res = await fetchWithTimeout(url);
-  if (!res.ok) throw new Error(`Stooq a répondu ${res.status}`);
+/** Un corps de réponse d'erreur peut être long : on le résume. */
+function resumeCorps(corps: string): string {
+  const propre = corps.replace(/\s+/g, " ").trim();
+  if (!propre) return "";
+  return propre.length > 160 ? `${propre.slice(0, 160)}…` : propre;
+}
 
-  const csv = await res.text();
-  const lines = csv.trim().split("\n");
-  if (lines.length < 2 || !lines[0].toLowerCase().startsWith("date")) {
-    throw new Error("Réponse Stooq inattendue");
-  }
+async function essayer(
+  source: Source,
+  asset: Asset,
+  days: number,
+  fetchImpl: FetchLike,
+): Promise<{ bars?: Bar[]; tentative: Tentative }> {
+  const url = source.url(asset, days);
 
-  const bars: Bar[] = [];
-  for (const line of lines.slice(1)) {
-    const [day, open, high, low, close] = line.split(",");
-    const bar = {
-      day,
-      open: Number(open),
-      high: Number(high),
-      low: Number(low),
-      close: Number(close),
+  if (!url) {
+    return {
+      tentative: {
+        source: source.label,
+        hote: "—",
+        ok: false,
+        status: null,
+        message: `ne couvre pas ${asset.id}`,
+        ms: 0,
+      },
     };
-    if (Number.isFinite(bar.close) && bar.close > 0) bars.push(bar);
   }
-  return bars.slice(-days);
+
+  const hote = hoteDe(url);
+  const depart = Date.now();
+  const controller = new AbortController();
+  const minuteur = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  try {
+    const reponse = await fetchImpl(url, {
+      signal: controller.signal,
+      headers: source.headers,
+    });
+    const ms = Date.now() - depart;
+
+    if (!reponse.ok) {
+      const corps = resumeCorps(await reponse.text().catch(() => ""));
+      return {
+        tentative: {
+          source: source.label,
+          hote,
+          ok: false,
+          status: reponse.status,
+          message: `HTTP ${reponse.status}${corps ? ` — ${corps}` : ""}`,
+          ms,
+        },
+      };
+    }
+
+    const bars = source.parse(await reponse.text(), days);
+
+    if (bars.length < MIN_BARS) {
+      return {
+        tentative: {
+          source: source.label,
+          hote,
+          ok: false,
+          status: reponse.status,
+          message: `seulement ${bars.length} journée(s) reçue(s), insuffisant`,
+          ms,
+        },
+      };
+    }
+
+    return {
+      bars,
+      tentative: {
+        source: source.label,
+        hote,
+        ok: true,
+        status: reponse.status,
+        message: `${bars.length} journées reçues`,
+        ms,
+      },
+    };
+  } catch (e) {
+    return {
+      tentative: {
+        source: source.label,
+        hote,
+        ok: false,
+        status: null,
+        message: messageErreur(e),
+        ms: Date.now() - depart,
+      },
+    };
+  } finally {
+    clearTimeout(minuteur);
+  }
 }
 
-export async function downloadBars(asset: Asset, days: number): Promise<Bar[]> {
-  const bars =
-    asset.provider === "binance"
-      ? await fromBinance(asset.symbol, days)
-      : await fromStooq(asset.symbol, days);
+/**
+ * Essaie les sources dans l'ordre et renvoie la première qui répond.
+ * Lève une erreur enrichie des tentatives si toutes échouent.
+ */
+export async function telecharger(
+  asset: Asset,
+  days: number,
+  fetchImpl: FetchLike = fetchParDefaut,
+  sources: Source[] = sourcesPour(asset),
+): Promise<Recolte> {
+  const tentatives: Tentative[] = [];
 
-  if (bars.length === 0) throw new Error("Aucune donnée reçue");
-  return bars;
+  for (const source of sources) {
+    const { bars, tentative } = await essayer(source, asset, days, fetchImpl);
+    tentatives.push(tentative);
+
+    if (bars) {
+      return {
+        bars,
+        source: source.id,
+        sourceLabel: source.label,
+        ohlc: source.ohlc,
+        note: source.note,
+        tentatives,
+      };
+    }
+  }
+
+  const erreur = new Error(`aucune source n'a répondu pour ${asset.id}`) as Error & {
+    tentatives: Tentative[];
+  };
+  erreur.tentatives = tentatives;
+  throw erreur;
 }
+
+const fetchParDefaut: FetchLike = (url, init) =>
+  fetch(url, { ...init, cache: "no-store" });

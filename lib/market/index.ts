@@ -1,43 +1,46 @@
 import "server-only";
 import { query } from "../db";
 import { getAsset, type AssetId } from "./assets";
-import { downloadBars } from "./providers";
+import { telecharger } from "./providers";
 import { demoBars } from "./demo";
-import type { Bar, PriceSeries } from "./types";
+import type { Bar, PriceSeries, Tentative } from "./types";
 
 export * from "./assets";
-export type { Bar, PriceSeries } from "./types";
+export type { Bar, PriceSeries, Tentative } from "./types";
 
 const DEFAULT_DAYS = 400;
-/** Durée de validité du cache : on ne retélécharge pas plus d'une fois par heure. */
 const CACHE_TTL_MS = 3600_000;
 
-const lastFetch = new Map<string, number>();
+const dernierAppel = new Map<string, number>();
+/** Dernières tentatives par actif, pour la page /diagnostic. */
+const dernieresTentatives = new Map<string, Tentative[]>();
 
-async function readCache(asset: string, days: number): Promise<Bar[]> {
+export function tentativesConnues(assetId: string): Tentative[] {
+  return dernieresTentatives.get(assetId) ?? [];
+}
+
+// ─── Cache (simple optimisation : jamais bloquant) ───────────────────
+
+async function lireCache(asset: string, days: number): Promise<Bar[]> {
   try {
-    return await readCacheOrThrow(asset, days);
+    const rows = await query<Bar>(
+      `SELECT to_char(day, 'YYYY-MM-DD') AS day, open, high, low, close
+       FROM price_bars WHERE asset = $1 ORDER BY day DESC LIMIT $2`,
+      [asset, days],
+    );
+    return rows.map((b) => ({
+      day: String(b.day),
+      open: Number(b.open),
+      high: Number(b.high),
+      low: Number(b.low),
+      close: Number(b.close),
+    }));
   } catch {
-    return []; // base indisponible : on se passe du cache.
+    return [];
   }
 }
 
-async function readCacheOrThrow(asset: string, days: number): Promise<Bar[]> {
-  const rows = await query<Bar>(
-    `SELECT to_char(day, 'YYYY-MM-DD') AS day, open, high, low, close
-     FROM price_bars WHERE asset = $1 ORDER BY day DESC LIMIT $2`,
-    [asset, days],
-  );
-  return rows.map((b) => ({
-    day: String(b.day),
-    open: Number(b.open),
-    high: Number(b.high),
-    low: Number(b.low),
-    close: Number(b.close),
-  }));
-}
-
-async function cacheSource(asset: string): Promise<string | null> {
+async function sourceDuCache(asset: string): Promise<string | null> {
   try {
     const rows = await query<{ source: string }>(
       "SELECT source FROM price_bars WHERE asset = $1 LIMIT 1",
@@ -49,51 +52,41 @@ async function cacheSource(asset: string): Promise<string | null> {
   }
 }
 
-async function writeCache(asset: string, bars: Bar[], source: string) {
+async function ecrireCache(asset: string, bars: Bar[], source: string) {
   try {
-    await writeCacheOrThrow(asset, bars, source);
+    const LOT = 500;
+    for (let i = 0; i < bars.length; i += LOT) {
+      const tranche = bars.slice(i, i + LOT);
+      const params: unknown[] = [];
+      const valeurs = tranche
+        .map((b, j) => {
+          params.push(asset, b.day, b.open, b.high, b.low, b.close, source);
+          const n = j * 7;
+          return `($${n + 1}, $${n + 2}, $${n + 3}, $${n + 4}, $${n + 5}, $${n + 6}, $${n + 7})`;
+        })
+        .join(", ");
+      await query(
+        `INSERT INTO price_bars (asset, day, open, high, low, close, source)
+         VALUES ${valeurs}
+         ON CONFLICT (asset, day) DO UPDATE SET
+           open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
+           close = EXCLUDED.close, source = EXCLUDED.source`,
+        params,
+      );
+    }
   } catch (e) {
     console.warn("[marché] cache indisponible :", (e as Error).message);
   }
 }
 
-async function writeCacheOrThrow(asset: string, bars: Bar[], source: string) {
-  // Insertion groupée : une seule requête plutôt qu'une par journée.
-  const valeurs: string[] = [];
-  const params: unknown[] = [];
-  bars.forEach((b, i) => {
-    const n = i * 7;
-    valeurs.push(`($${n + 1}, $${n + 2}, $${n + 3}, $${n + 4}, $${n + 5}, $${n + 6}, $${n + 7})`);
-    params.push(asset, b.day, b.open, b.high, b.low, b.close, source);
-  });
-
-  // On découpe pour ne pas dépasser la limite de paramètres de Postgres.
-  const LOT = 500;
-  for (let i = 0; i < valeurs.length; i += LOT) {
-    const tranche = valeurs.slice(i, i + LOT);
-    const decalage = i * 7;
-    const texte = tranche
-      .map((_, j) => {
-        const n = j * 7;
-        return `($${n + 1}, $${n + 2}, $${n + 3}, $${n + 4}, $${n + 5}, $${n + 6}, $${n + 7})`;
-      })
-      .join(", ");
-    await query(
-      `INSERT INTO price_bars (asset, day, open, high, low, close, source)
-       VALUES ${texte}
-       ON CONFLICT (asset, day) DO UPDATE SET
-         open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
-         close = EXCLUDED.close, source = EXCLUDED.source`,
-      params.slice(decalage, decalage + tranche.length * 7),
-    );
-  }
-}
+// ─── Récupération des prix ───────────────────────────────────────────
 
 /**
  * Prix journaliers d'un actif, du plus ancien au plus récent.
  *
- * Stratégie : cache en base → téléchargement réel → données de démo.
- * `source` indique toujours d'où viennent les prix affichés.
+ * Ordre : cache récent → sources réelles (dans l'ordre) → cache périmé →
+ * prix inventés. Le champ `source` dit toujours d'où viennent les prix, et
+ * vaut "demo" lorsqu'ils sont inventés.
  */
 export async function getPrices(
   assetId: AssetId,
@@ -102,37 +95,79 @@ export async function getPrices(
   const asset = getAsset(assetId);
   if (!asset) throw new Error(`Actif inconnu : ${assetId}`);
 
-  const recent = lastFetch.get(assetId) ?? 0;
-  const cached = await readCache(assetId, days);
-  const frais = Date.now() - recent < CACHE_TTL_MS;
+  const cache = await lireCache(assetId, days);
+  const frais = Date.now() - (dernierAppel.get(assetId) ?? 0) < CACHE_TTL_MS;
 
-  if (cached.length > 0 && frais) {
-    return { asset: assetId, bars: cached.reverse(), source: (await cacheSource(assetId)) ?? "cache" };
+  if (cache.length > 0 && frais) {
+    const src = (await sourceDuCache(assetId)) ?? "cache";
+    return {
+      asset: assetId,
+      bars: cache.reverse(),
+      source: src,
+      sourceLabel: src === "demo" ? "Données inventées" : `${src} (en cache)`,
+      ohlc: true,
+      tentatives: tentativesConnues(assetId),
+    };
   }
 
   try {
-    const bars = await downloadBars(asset, days);
-    await writeCache(assetId, bars, asset.provider);
-    lastFetch.set(assetId, Date.now());
-    return { asset: assetId, bars, source: asset.provider };
-  } catch (error) {
-    console.warn(`[marché] ${assetId} : téléchargement impossible —`, (error as Error).message);
+    const r = await telecharger(asset, days);
+    dernieresTentatives.set(assetId, r.tentatives);
+    dernierAppel.set(assetId, Date.now());
+    await ecrireCache(assetId, r.bars, r.source);
 
-    // On préfère un cache réel, même périmé, aux données inventées.
-    if (cached.length > 0) {
-      return { asset: assetId, bars: cached.reverse(), source: (await cacheSource(assetId)) ?? "cache" };
+    return {
+      asset: assetId,
+      bars: r.bars,
+      source: r.source,
+      sourceLabel: r.sourceLabel,
+      ohlc: r.ohlc,
+      note: r.note,
+      tentatives: r.tentatives,
+    };
+  } catch (e) {
+    const tentatives = (e as Error & { tentatives?: Tentative[] }).tentatives ?? [];
+    dernieresTentatives.set(assetId, tentatives);
+    console.warn(
+      `[marché] ${assetId} : aucune source n'a répondu —`,
+      tentatives.map((t) => `${t.source}: ${t.message}`).join(" | "),
+    );
+
+    // Un cache réel, même périmé, vaut mieux que des prix inventés.
+    if (cache.length > 0) {
+      const src = (await sourceDuCache(assetId)) ?? "cache";
+      if (src !== "demo") {
+        return {
+          asset: assetId,
+          bars: cache.reverse(),
+          source: src,
+          sourceLabel: `${src} (en cache, périmé)`,
+          ohlc: true,
+          tentatives,
+        };
+      }
     }
 
     const bars = demoBars(assetId, days);
-    await writeCache(assetId, bars, "demo");
-    lastFetch.set(assetId, Date.now());
-    return { asset: assetId, bars, source: "demo" };
+    dernierAppel.set(assetId, Date.now());
+    await ecrireCache(assetId, bars, "demo");
+
+    return {
+      asset: assetId,
+      bars,
+      source: "demo",
+      sourceLabel: "Données inventées",
+      ohlc: true,
+      tentatives,
+    };
   }
 }
 
 /** Dernier prix connu d'un actif. */
-export async function getLastPrice(assetId: AssetId): Promise<{ price: number; source: string }> {
-  const serie = await getPrices(assetId, 5);
+export async function getLastPrice(
+  assetId: AssetId,
+): Promise<{ price: number; source: string }> {
+  const serie = await getPrices(assetId, 30);
   const last = serie.bars.at(-1);
   if (!last) throw new Error(`Aucun prix pour ${assetId}`);
   return { price: last.close, source: serie.source };

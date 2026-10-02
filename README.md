@@ -29,14 +29,34 @@ Les tables sont créées automatiquement au premier lancement.
 ## Comment ça marche
 
 ### Données de marché
-Deux sources gratuites et sans inscription :
-- **Binance** (`/api/v3/klines`) pour BTC, ETH et DOGE ;
-- **Stooq** (export CSV) pour le SPY.
 
-Les prix sont mis en cache en base pendant une heure. **Si le réseau est bloqué**
-(hors-ligne, pare-feu d'entreprise), l'application bascule sur des prix *inventés* pour
-rester utilisable — et affiche alors un bandeau rouge « Données de démonstration ».
-Ces prix n'ont aucune valeur historique.
+Plusieurs sources gratuites et sans clé API, essayées **dans l'ordre** ; la
+première qui répond est retenue.
+
+| Actif | 1ʳᵉ source | 2ᵉ | 3ᵉ | 4ᵉ |
+|---|---|---|---|---|
+| Bitcoin, Ethereum, Dogecoin | Binance | Coinbase Exchange | Kraken | CoinGecko |
+| S&P 500 | Stooq | Yahoo Finance | FRED (indice) | — |
+
+Pourquoi plusieurs : Binance restreint l'accès depuis certains pays, et les
+serveurs de Vercel sont majoritairement aux États-Unis. Coinbase et Kraken
+sont des sociétés américaines, CoinGecko est ouvert — au moins l'une devrait
+répondre.
+
+⚠️ **FRED publie l'indice S&P 500, pas l'ETF SPY** : le niveau de prix diffère
+(≈ 5 000 contre ≈ 600), l'évolution reste comparable, et la source ne fournit
+que des clôtures. Si c'est elle qui répond, `/diagnostic` l'affiche en clair.
+
+> **Non vérifié depuis le dépôt.** Le réseau sortant de l'environnement de
+> développement est fermé : aucune de ces adresses n'a pu être appelée, ni
+> aucune documentation consultée. Les formats de réponse sont couverts par des
+> tests avec réponses simulées, mais seule la page `/diagnostic`, une fois le
+> site en ligne, dit laquelle répond vraiment.
+
+Les prix sont mis en cache une heure. Si aucune source ne répond, un cache
+même périmé est préféré aux prix inventés ; en dernier recours seulement,
+l'application bascule sur des prix **inventés** et l'affiche en rouge sur
+toutes les pages concernées.
 
 ### Accès
 Le site entier est protégé par **un seul mot de passe**, lu dans la variable
@@ -112,6 +132,7 @@ lib/
   engine/             Stratégies et moteur de backtest
 tests/engine.test.ts  Tests du moteur (anti-triche, frais, calculs)
 tests/session.test.ts Tests du mot de passe et des jetons de session
+tests/market.test.ts  Tests de la bascule entre sources et des analyseurs
 tests/db.test.ts      Tests SQL contre un vrai PostgreSQL en mémoire
 tests/pg-local.mjs    Serveur PostgreSQL local pour le développement
 ```
@@ -211,7 +232,7 @@ tes 1 000 € fictifs.
 | « Site pas encore configuré » sur la page d'accès | `SITE_PASSWORD` manque (étape 4), ou tu n'as pas redéployé (étape 6). |
 | « Base de données : pas encore connectée » | L'étape 4 n'a pas abouti, ou tu n'as pas redéployé (étape 5). |
 | « Base configurée mais injoignable » | La base Neon est peut-être en veille : recharge la page une fois. |
-| « Démonstration » sur les prix | Les prix affichés sont **inventés**. Recharge dans une minute ; si ça persiste, Binance ou Stooq sont momentanément indisponibles. |
+| « Démonstration » sur les prix | Les prix affichés sont **inventés**. Ouvre `/diagnostic` : chaque source essayée y est listée avec la cause exacte de son échec (code HTTP, message, délai dépassé). |
 | Page blanche ou erreur 500 | Vercel → **Deployments** → clique le déploiement → **Runtime Logs** pour voir le message. |
 
 > La page `/diagnostic` n'expose aucune donnée personnelle ni mot de passe, et

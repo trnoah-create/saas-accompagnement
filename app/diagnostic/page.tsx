@@ -102,37 +102,81 @@ export default async function Page() {
       {/* Prix */}
       <h2 className="mt-10 text-xl font-bold">Prix de marché</h2>
       <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-        « Réels » signifie que les prix viennent bien de Binance ou de Stooq. « Démonstration »
-        signifie que le réseau a échoué et que les prix sont inventés.
+        Les sources sont essayées dans l&apos;ordre ; la première qui répond est retenue.
+        « Démonstration » signifie qu&apos;aucune n&apos;a répondu et que les prix affichés sont
+        <strong> inventés</strong>.
       </p>
 
-      <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-800">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-left dark:bg-slate-900/50">
-            <tr>
-              <th className="px-4 py-3 font-semibold">Actif</th>
-              <th className="px-4 py-3 font-semibold">Fournisseur</th>
-              <th className="px-4 py-3 font-semibold">État</th>
-              <th className="px-4 py-3 font-semibold">Dernier prix</th>
-              <th className="px-4 py-3 font-semibold">Date</th>
-              <th className="px-4 py-3 font-semibold">Jours reçus</th>
-            </tr>
-          </thead>
-          <tbody>
-            {actifs.map((a) => (
-              <tr key={a.id} className="border-t border-slate-200 dark:border-slate-800">
-                <td className="px-4 py-3 font-medium">{a.label}</td>
-                <td className="px-4 py-3 text-slate-500">{a.fournisseur}</td>
-                <td className="px-4 py-3">
-                  <Pastille ok={a.reel} texte={a.reel ? "Prix réels" : "Démonstration"} />
-                </td>
-                <td className="px-4 py-3">{a.dernierPrix === null ? "—" : prix(a.dernierPrix)}</td>
-                <td className="px-4 py-3">{a.derniereDate ?? "—"}</td>
-                <td className="px-4 py-3">{a.jours}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="mt-5 space-y-5">
+        {actifs.map((a) => (
+          <div key={a.id} className="rounded-2xl border border-slate-200 p-5 dark:border-slate-800">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h3 className="font-semibold">{a.label}</h3>
+              <Pastille ok={a.reel} texte={a.reel ? "Prix réels" : "Démonstration"} />
+            </div>
+
+            <dl className="mt-3 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
+              <div className="flex gap-2">
+                <dt className="text-slate-500">Source retenue :</dt>
+                <dd className="font-medium">{a.sourceLabel}</dd>
+              </div>
+              <div className="flex gap-2">
+                <dt className="text-slate-500">Dernier prix :</dt>
+                <dd>{a.dernierPrix === null ? "—" : prix(a.dernierPrix)}</dd>
+              </div>
+              <div className="flex gap-2">
+                <dt className="text-slate-500">Dernière date :</dt>
+                <dd>{a.derniereDate ?? "—"}</dd>
+              </div>
+              <div className="flex gap-2">
+                <dt className="text-slate-500">Journées reçues :</dt>
+                <dd>{a.jours}</dd>
+              </div>
+            </dl>
+
+            {a.note && (
+              <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+                {a.note}
+              </p>
+            )}
+
+            {a.tentatives.length > 0 && (
+              <div className="mt-4">
+                <h4 className="text-xs font-semibold tracking-wide text-slate-500 uppercase">
+                  Sources essayées, dans l&apos;ordre
+                </h4>
+                <ol className="mt-2 space-y-1.5">
+                  {a.tentatives.map((t, i) => (
+                    <li
+                      key={`${t.source}-${i}`}
+                      className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm"
+                    >
+                      <span aria-hidden="true">{t.ok ? "✅" : "❌"}</span>
+                      <span className="font-medium">{t.source}</span>
+                      <span className="text-xs text-slate-500">{t.hote}</span>
+                      <span
+                        className={
+                          t.ok
+                            ? "text-emerald-700 dark:text-emerald-400"
+                            : "text-red-700 dark:text-red-400"
+                        }
+                      >
+                        {t.message}
+                      </span>
+                      {t.ms > 0 && <span className="text-xs text-slate-500">· {t.ms} ms</span>}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+
+            {a.tentatives.length === 0 && (
+              <p className="mt-3 text-xs text-slate-500">
+                Prix servis depuis le cache : aucune source n&apos;a été interrogée cette fois-ci.
+              </p>
+            )}
+          </div>
+        ))}
       </div>
 
       <p className="mt-6 text-xs text-slate-500">

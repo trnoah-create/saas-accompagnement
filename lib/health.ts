@@ -1,6 +1,6 @@
 import "server-only";
 import { baseConfiguree, query, urlBase } from "./db";
-import { ASSETS, getPrices, type AssetId } from "./market";
+import { ASSETS, getPrices, type AssetId, type Tentative } from "./market";
 import { motDePasseConfigure } from "./session";
 
 export type EtatBase = {
@@ -28,12 +28,14 @@ export function etatAcces(): EtatAcces {
 export type EtatActif = {
   id: string;
   label: string;
-  fournisseur: string;
   source: string;
+  sourceLabel: string;
   reel: boolean;
+  note?: string;
   dernierPrix: number | null;
   derniereDate: string | null;
   jours: number;
+  tentatives: Tentative[];
 };
 
 export async function etatBase(): Promise<EtatBase> {
@@ -72,28 +74,31 @@ export async function etatActifs(): Promise<EtatActif[]> {
   return Promise.all(
     ASSETS.map(async (a) => {
       try {
-        const { bars, source } = await getPrices(a.id as AssetId, 30);
-        const dernier = bars.at(-1);
+        const serie = await getPrices(a.id as AssetId, 30);
+        const dernier = serie.bars.at(-1);
         return {
           id: a.id,
           label: a.label,
-          fournisseur: a.provider,
-          source,
-          reel: source !== "demo",
+          source: serie.source,
+          sourceLabel: serie.sourceLabel,
+          reel: serie.source !== "demo",
+          note: serie.note,
           dernierPrix: dernier?.close ?? null,
           derniereDate: dernier?.day ?? null,
-          jours: bars.length,
+          jours: serie.bars.length,
+          tentatives: serie.tentatives,
         };
       } catch (e) {
         return {
           id: a.id,
           label: a.label,
-          fournisseur: a.provider,
-          source: `erreur : ${(e as Error).message}`,
+          source: "erreur",
+          sourceLabel: `Erreur : ${(e as Error).message}`,
           reel: false,
           dernierPrix: null,
           derniereDate: null,
           jours: 0,
+          tentatives: [],
         };
       }
     }),
