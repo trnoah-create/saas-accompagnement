@@ -2,6 +2,7 @@ import "server-only";
 import { baseConfiguree, query, urlBase } from "./db";
 import { ASSETS, getPrices, type AssetId, type Tentative } from "./market";
 import { motDePasseConfigure } from "./session";
+import { courtier } from "./broker";
 
 export type EtatBase = {
   configuree: boolean;
@@ -23,6 +24,23 @@ export function etatAcces(): EtatAcces {
         detail:
           "La variable SITE_PASSWORD est absente. Personne ne peut entrer, toi compris. Ajoute-la dans Vercel (Settings → Environment Variables), puis redéploie.",
       };
+}
+
+export type EtatClaudeTrader = {
+  cleApi: boolean;
+  cronSecret: boolean;
+  courtierNom: string;
+  courtierReel: boolean;
+};
+
+export function etatClaudeTrader(): EtatClaudeTrader {
+  const broker = courtier();
+  return {
+    cleApi: Boolean(process.env.ANTHROPIC_API_KEY),
+    cronSecret: Boolean(process.env.CRON_SECRET),
+    courtierNom: broker.nom,
+    courtierReel: broker.reel,
+  };
 }
 
 export type EtatActif = {

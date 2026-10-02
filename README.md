@@ -102,6 +102,36 @@ Trois tests le vérifient (`npm test`), dont celui-ci : deux séries identiques 
 un jour donné puis radicalement différentes doivent produire **exactement les mêmes
 ordres** avant le point de divergence.
 
+### Mode « Claude trader »
+
+Chaque jour, une tâche planifiée par Vercel Cron rassemble les prix récents et
+l'état d'un **portefeuille fictif dédié** (distinct du tien), demande au modèle
+une liste d'ordres au format strictement imposé, puis :
+
+1. **valide** chaque ordre — actif connu, quantité positive, liquidités
+   suffisantes, position détenue, plafond par ordre ;
+2. **exécute** ceux qui passent, via le courtier simulé, frais de 0,1 % ;
+3. **écrit un compte rendu** en français : ordres et justifications, valeur du
+   portefeuille, gain du jour, comparaison avec un témoin « acheter et garder »
+   démarré le même jour avec le même capital.
+
+Garde-fous : un ordre ne peut engager plus de 25 % du portefeuille, 6 ordres par
+jour au maximum, et au-delà de 5 % de perte depuis la veille plus aucun ordre
+n'est passé. **Si l'appel échoue ou si la réponse ne respecte pas le format,
+aucun ordre n'est passé** et la raison est consignée. Un bouton met le mode en
+pause.
+
+### ⚠️ Aucun courtier réel
+
+Toute exécution passe par l'interface `Courtier` (`lib/broker/`). Une seule
+implémentation existe : **la simulation**. Le dépôt ne contient aucun code
+capable de contacter un courtier, aucun identifiant, aucune donnée bancaire.
+
+Brancher un vrai courtier demanderait d'écrire une nouvelle implémentation de
+l'interface *et* de modifier sciemment une constante dans
+[`lib/broker/index.ts`](lib/broker/index.ts). Aucune variable d'environnement
+oubliée ne peut déclencher d'ordre réel.
+
 ### Bot
 Applique la stratégie choisie au portefeuille fictif, avec un **stop de perte maximale**
 réglable : si la valeur passe sous le seuil, tout est vendu et le bot s'arrête en
@@ -119,8 +149,12 @@ app/
   comparateur/        Tous les actifs × toutes les stratégies
   bot/                Réglages et exécution du bot
   diagnostic/         Vérification base + prix, à ouvrir après déploiement
+  claude-trader/      Comptes rendus quotidiens et bouton de pause
+  api/cron/           Tâche quotidienne (protégée par CRON_SECRET)
 lib/
   db.ts               Base PostgreSQL (schéma, migration, transactions)
+  broker/             Interface courtier — simulation uniquement
+  claude-trader/      Décision, validation, exécution, compte rendu
   session.ts          Mot de passe unique et jeton de session signé
   acces.ts            Ouverture et fermeture de session (cookie)
   health.ts           Contrôles affichés sur /diagnostic
@@ -133,6 +167,7 @@ lib/
 tests/engine.test.ts  Tests du moteur (anti-triche, frais, calculs)
 tests/session.test.ts Tests du mot de passe et des jetons de session
 tests/market.test.ts  Tests de la bascule entre sources et des analyseurs
+tests/claude-trader.test.ts  Tests de validation des ordres et des plafonds
 tests/db.test.ts      Tests SQL contre un vrai PostgreSQL en mémoire
 tests/pg-local.mjs    Serveur PostgreSQL local pour le développement
 ```
@@ -196,7 +231,23 @@ Ce mot de passe n'est écrit nulle part dans le code ni sur GitHub : il ne vit
 que dans Vercel. Si tu le changes, tu seras déconnecté et devras ressaisir le
 nouveau.
 
-### Étape 5 — Brancher la base de données gratuite
+### Étape 5 — Activer le mode « Claude trader » (facultatif)
+
+Dans **Settings → Environment Variables**, ajoute :
+
+| Key | Value |
+|---|---|
+| `ANTHROPIC_API_KEY` | ta clé, créée sur **console.anthropic.com** → *API keys* |
+| `CRON_SECRET` | une longue phrase aléatoire de ton choix |
+
+Coche les trois environnements, puis **Save**. Sans `ANTHROPIC_API_KEY`, le reste
+du site fonctionne normalement : la tâche quotidienne se contente de noter qu'elle
+n'a pas pu décider, et ne passe aucun ordre.
+
+La tâche est déclarée dans `vercel.json` et s'exécute chaque jour à 18 h UTC.
+Vercel la crée automatiquement au premier déploiement.
+
+### Étape 6 — Brancher la base de données gratuite
 
 1. Dans ton projet Vercel → onglet **Storage**.
 2. **Create Database** → choisis **Neon** (PostgreSQL) → *Continue*.
@@ -206,18 +257,19 @@ nouveau.
 Vercel ajoute alors tout seul la variable `DATABASE_URL`. Tu n'as aucune
 adresse à recopier — ce qui évite les fautes de frappe sur un téléphone.
 
-### Étape 6 — Redéployer
+### Étape 7 — Redéployer
 
 **Deployments** → bouton `⋯` sur le déploiement le plus récent → **Redeploy**.
 C'est nécessaire pour que le site voie les nouvelles variables.
 
-### Étape 7 — Vérifier que tout marche
+### Étape 8 — Vérifier que tout marche
 
 Ouvre **`https://ton-site.vercel.app/diagnostic`** sur ton téléphone.
 
 Le mot de passe te sera demandé. Cette page te dit ensuite en clair :
 
 - ✅ **Mot de passe du site : configuré** → le site est bien protégé ;
+- ✅ **Mode Claude trader** → clé d'API et secret de la tâche présents ;
 - ✅ **Base de données : connectée** → les comptes seront bien enregistrés ;
 - ✅ **Prix de marché : les 4 actifs reçoivent de vrais prix** → Binance et
   Stooq répondent correctement.

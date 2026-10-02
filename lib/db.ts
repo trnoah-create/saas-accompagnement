@@ -218,6 +218,47 @@ const SCHEMA: string[] = [
      enabled        integer NOT NULL DEFAULT 0,
      stopped_reason text
    )`,
+  // ─── Mode « Claude trader » : portefeuille distinct du tien ───────
+  `CREATE TABLE IF NOT EXISTS claude_portfolio (
+     id            smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+     cash          double precision NOT NULL,
+     start_capital double precision NOT NULL,
+     started_on    date NOT NULL DEFAULT CURRENT_DATE,
+     paused        integer NOT NULL DEFAULT 0
+   )`,
+  `CREATE TABLE IF NOT EXISTS claude_positions (
+     asset    text PRIMARY KEY,
+     quantity double precision NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS claude_orders (
+     id         integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+     day        date NOT NULL DEFAULT CURRENT_DATE,
+     asset      text NOT NULL,
+     side       text NOT NULL CHECK (side IN ('buy','sell')),
+     quantity   double precision NOT NULL,
+     price      double precision NOT NULL,
+     fee        double precision NOT NULL,
+     reason     text NOT NULL DEFAULT '',
+     created_at timestamptz NOT NULL DEFAULT now()
+   )`,
+  // Portefeuille témoin « acheter et garder », figé au premier jour.
+  `CREATE TABLE IF NOT EXISTS claude_benchmark (
+     asset    text PRIMARY KEY,
+     quantity double precision NOT NULL
+   )`,
+  // Un compte rendu par jour.
+  `CREATE TABLE IF NOT EXISTS claude_reports (
+     day              date PRIMARY KEY,
+     statut           text NOT NULL,
+     valeur           double precision,
+     gain_jour_pct    double precision,
+     valeur_temoin    double precision,
+     temoin_gain_pct  double precision,
+     resume           text NOT NULL DEFAULT '',
+     detail           text NOT NULL DEFAULT '[]',
+     erreur           text,
+     created_at       timestamptz NOT NULL DEFAULT now()
+   )`,
   `CREATE TABLE IF NOT EXISTS price_bars (
      asset  text NOT NULL,
      day    date NOT NULL,

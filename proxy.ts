@@ -10,8 +10,14 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { COOKIE_ACCES, jetonValide } from "@/lib/session";
 
-/** Seuls chemins accessibles sans être connecté. */
-const LIBRES = ["/connexion", "/api/deconnexion"];
+/**
+ * Seuls chemins accessibles sans être connecté.
+ *
+ * /api/cron est appelé par Vercel Cron, qui ne peut pas saisir de mot de
+ * passe : cette adresse vérifie elle-même son propre secret (CRON_SECRET)
+ * et refuse tout appel sans lui.
+ */
+const LIBRES = ["/connexion", "/api/deconnexion", "/api/cron"];
 
 export function proxy(request: NextRequest) {
   const chemin = request.nextUrl.pathname;

@@ -27,6 +27,7 @@ export const siteConfig = {
   navPrivee: [
     { label: "Tableau de bord", href: "/tableau-de-bord" },
     { label: "Bot", href: "/bot" },
+    { label: "Claude trader", href: "/claude-trader" },
   ],
 
   login: { label: "Se connecter", href: "/connexion" },

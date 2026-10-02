@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { etatBase, etatActifs, etatAcces } from "@/lib/health";
+import { etatBase, etatActifs, etatAcces, etatClaudeTrader } from "@/lib/health";
 import { prix } from "@/lib/format";
 
 export const metadata: Metadata = { title: "Diagnostic", robots: { index: false } };
@@ -22,6 +22,7 @@ function Pastille({ ok, texte }: { ok: boolean; texte: string }) {
 
 export default async function Page() {
   const acces = etatAcces();
+  const trader = etatClaudeTrader();
   const base = await etatBase();
   const actifs = await etatActifs();
 
@@ -74,6 +75,34 @@ export default async function Page() {
             section « Mettre le site en ligne depuis un téléphone ».
           </p>
         )}
+      </div>
+
+      {/* Mode Claude trader */}
+      <h2 className="mt-10 text-xl font-bold">Mode Claude trader</h2>
+      <div className="mt-4 space-y-3 rounded-2xl border border-slate-200 p-5 dark:border-slate-800">
+        <div className="flex flex-wrap items-center gap-3">
+          <Pastille
+            ok={trader.cleApi}
+            texte={trader.cleApi ? "ANTHROPIC_API_KEY définie" : "ANTHROPIC_API_KEY absente"}
+          />
+          <Pastille
+            ok={trader.cronSecret}
+            texte={trader.cronSecret ? "CRON_SECRET défini" : "CRON_SECRET absent"}
+          />
+          <Pastille ok={!trader.courtierReel} texte={`Courtier : ${trader.courtierNom}`} />
+        </div>
+        <p className="text-sm text-slate-600 dark:text-slate-400">
+          {trader.cleApi
+            ? "La tâche quotidienne pourra demander une décision au modèle."
+            : "Sans clé d'API, la tâche quotidienne ne passera aucun ordre."}{" "}
+          {trader.cronSecret
+            ? "L'adresse de la tâche est protégée par son secret."
+            : "Sans CRON_SECRET, l'adresse de la tâche est fermée et la tâche ne peut pas s'exécuter."}
+        </p>
+        <p className="text-xs text-slate-500">
+          Aucune valeur de clé n&apos;est affichée ici. Le courtier réel n&apos;existe pas dans ce
+          projet : seule la simulation est implémentée.
+        </p>
       </div>
 
       {/* Accès */}
