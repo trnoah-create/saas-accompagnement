@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "tsx tests/engine.test.ts && tsx --tsconfig tests/tsconfig.json tests/db.test.ts"
+    "test": "tsx tests/engine.test.ts && tsx tests/session.test.ts && tsx --tsconfig tests/tsconfig.json tests/db.test.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.2.0",

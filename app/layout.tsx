@@ -3,7 +3,7 @@ import { Geist } from "next/font/google";
 import { Header } from "@/components/header";
 import { Footer } from "@/components/footer";
 import { DisclaimerBanner } from "@/components/disclaimer";
-import { currentUser } from "@/lib/auth";
+import { connecte } from "@/lib/acces";
 import { ThemeProvider, themeInitScript } from "@/components/theme-provider";
 import { siteConfig } from "@/config/site";
 import "./globals.css";
@@ -39,7 +39,7 @@ export const metadata: Metadata = {
 export default async function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  const user = await currentUser();
+  const connecteOuiNon = await connecte();
 
   return (
     <html lang="fr" suppressHydrationWarning>
@@ -56,7 +56,7 @@ export default async function RootLayout({
             Aller au contenu
           </a>
           <DisclaimerBanner />
-          <Header user={user} />
+          <Header connecte={connecteOuiNon} />
           <main id="contenu" className="flex-1">
             {children}
           </main>

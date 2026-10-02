@@ -1,6 +1,7 @@
 import "server-only";
 import { baseConfiguree, query, urlBase } from "./db";
 import { ASSETS, getPrices, type AssetId } from "./market";
+import { motDePasseConfigure } from "./session";
 
 export type EtatBase = {
   configuree: boolean;
@@ -8,6 +9,21 @@ export type EtatBase = {
   detail: string;
   hote: string | null;
 };
+
+export type EtatAcces = { configure: boolean; detail: string };
+
+export function etatAcces(): EtatAcces {
+  return motDePasseConfigure()
+    ? {
+        configure: true,
+        detail: "La variable SITE_PASSWORD est bien définie : le site est protégé.",
+      }
+    : {
+        configure: false,
+        detail:
+          "La variable SITE_PASSWORD est absente. Personne ne peut entrer, toi compris. Ajoute-la dans Vercel (Settings → Environment Variables), puis redéploie.",
+      };
+}
 
 export type EtatActif = {
   id: string;

@@ -1,6 +1,4 @@
 import type { Metadata } from "next";
-import { redirect } from "next/navigation";
-import { currentUser } from "@/lib/auth";
 import { getPortfolio, getOrders } from "@/lib/portfolio";
 import { ASSETS, getPrices, type AssetId } from "@/lib/market";
 import { TradePanel } from "@/components/trade-panel";
@@ -14,11 +12,8 @@ export const metadata: Metadata = { title: "Tableau de bord" };
 export const dynamic = "force-dynamic";
 
 export default async function Page() {
-  const user = await currentUser();
-  if (!user) redirect("/connexion");
-
-  const portefeuille = await getPortfolio(user.id);
-  const ordres = await getOrders(user.id, 20);
+  const portefeuille = await getPortfolio();
+  const ordres = await getOrders(20);
 
   // Prix courants + courbes pour chaque actif.
   const series = await Promise.all(
@@ -42,7 +37,9 @@ export default async function Page() {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Tableau de bord</h1>
-          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">{user.email}</p>
+          <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+            Portefeuille fictif du propriétaire
+          </p>
         </div>
         <form action={actionReset}>
           <button type="submit"

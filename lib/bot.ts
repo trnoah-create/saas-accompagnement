@@ -25,11 +25,10 @@ const DEFAUT: BotConfig = {
   stopped_reason: null,
 };
 
-export async function getBot(userId: number): Promise<BotConfig> {
+export async function getBot(): Promise<BotConfig> {
   const row = await queryOne<BotConfig>(
     `SELECT asset, strategy, fast, slow, max_loss_pct, enabled, stopped_reason
-     FROM bots WHERE user_id = $1`,
-    [userId],
+     FROM owner_bot WHERE id = 1`,
   );
   if (!row) return DEFAUT;
   return {
@@ -41,8 +40,8 @@ export async function getBot(userId: number): Promise<BotConfig> {
   };
 }
 
-export async function saveBot(userId: number, config: Partial<BotConfig>): Promise<void> {
-  const actuel = await getBot(userId);
+export async function saveBot(config: Partial<BotConfig>): Promise<void> {
+  const actuel = await getBot();
   const c = { ...actuel, ...config };
 
   // Garde-fous : une moyenne courte doit rester plus courte que la longue.
@@ -52,13 +51,13 @@ export async function saveBot(userId: number, config: Partial<BotConfig>): Promi
   c.max_loss_pct = Math.max(1, Math.min(90, c.max_loss_pct));
 
   await query(
-    `INSERT INTO bots (user_id, asset, strategy, fast, slow, max_loss_pct, enabled, stopped_reason)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     ON CONFLICT (user_id) DO UPDATE SET
+    `INSERT INTO owner_bot (id, asset, strategy, fast, slow, max_loss_pct, enabled, stopped_reason)
+     VALUES (1, $1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (id) DO UPDATE SET
        asset = EXCLUDED.asset, strategy = EXCLUDED.strategy, fast = EXCLUDED.fast,
        slow = EXCLUDED.slow, max_loss_pct = EXCLUDED.max_loss_pct,
        enabled = EXCLUDED.enabled, stopped_reason = EXCLUDED.stopped_reason`,
-    [userId, c.asset, c.strategy, c.fast, c.slow, c.max_loss_pct, c.enabled, c.stopped_reason],
+    [c.asset, c.strategy, c.fast, c.slow, c.max_loss_pct, c.enabled, c.stopped_reason],
   );
 }
 
@@ -73,20 +72,20 @@ export type BotRun = {
  * Même règle anti-triche que le backtest : la décision n'utilise que les
  * journées déjà closes, jamais la bougie du jour en cours.
  */
-export async function runBot(userId: number): Promise<BotRun> {
-  const bot = await getBot(userId);
+export async function runBot(): Promise<BotRun> {
+  const bot = await getBot();
   if (!bot.enabled) return { action: "aucune", message: "Le bot est à l'arrêt." };
 
-  const portefeuille = await getPortfolio(userId);
+  const portefeuille = await getPortfolio();
 
   // Stop de perte : on liquide et on coupe le bot.
   const seuil = portefeuille.startCapital * (1 - bot.max_loss_pct / 100);
   if (portefeuille.totalValue < seuil) {
     for (const p of portefeuille.positions) {
-      await sell(userId, p.asset as AssetId, p.quantity, "bot");
+      await sell(p.asset as AssetId, p.quantity, "bot");
     }
     const raison = `Stop de perte atteint : la valeur est passée sous ${euro(seuil)} (-${bot.max_loss_pct} %). Positions liquidées, bot arrêté.`;
-    await saveBot(userId, { enabled: 0, stopped_reason: raison });
+    await saveBot({ enabled: 0, stopped_reason: raison });
     return { action: "arrêt", message: raison };
   }
 
@@ -99,12 +98,12 @@ export async function runBot(userId: number): Promise<BotRun> {
   const detenu = portefeuille.positions.find((p) => p.asset === bot.asset);
 
   if (voulu === "long" && !detenu && portefeuille.cash > 1) {
-    await buy(userId, bot.asset, portefeuille.cash, "bot");
+    await buy(bot.asset, portefeuille.cash, "bot");
     return { action: "achat", message: `Signal d'achat : tout le liquide investi en ${bot.asset}.` };
   }
 
   if (voulu === "flat" && detenu) {
-    await sell(userId, bot.asset, detenu.quantity, "bot");
+    await sell(bot.asset, detenu.quantity, "bot");
     return { action: "vente", message: `Signal de vente : position ${bot.asset} soldée.` };
   }
 

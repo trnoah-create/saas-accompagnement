@@ -4,7 +4,6 @@ import { siteConfig } from "@/config/site";
 import { START_CAPITAL, DISCLAIMER } from "@/lib/constants";
 import { ASSETS } from "@/lib/market";
 import { STRATEGIES } from "@/lib/engine/strategies";
-import { currentUser } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -15,8 +14,6 @@ const atouts = [
 ];
 
 export default async function HomePage() {
-  const user = await currentUser();
-
   return (
     <>
       <section className="relative overflow-hidden">
@@ -26,7 +23,7 @@ export default async function HomePage() {
         <div className="container-page py-20 text-center sm:py-28">
           <Eyebrow>
             <span className="size-1.5 rounded-full bg-emerald-500" />
-            {START_CAPITAL} € fictifs offerts à l&apos;inscription
+            {START_CAPITAL} € fictifs pour s&apos;entraîner
           </Eyebrow>
 
           <h1 className="mx-auto mt-8 max-w-4xl text-4xl font-bold tracking-tight text-balance sm:text-6xl">
@@ -42,8 +39,8 @@ export default async function HomePage() {
           </p>
 
           <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
-            <ButtonLink href={user ? "/tableau-de-bord" : "/inscription"} className="w-full sm:w-auto">
-              {user ? "Ouvrir mon tableau de bord" : "Créer mon compte gratuit"}
+            <ButtonLink href="/tableau-de-bord" className="w-full sm:w-auto">
+              Ouvrir mon tableau de bord
               <ArrowIcon className="size-4" />
             </ButtonLink>
             <ButtonLink href="/backtest" variant="secondary" className="w-full sm:w-auto">

@@ -121,6 +121,9 @@ export async function ensureSchema(): Promise<void> {
 async function creerSchema() {
   const run = await getRunner();
   for (const text of SCHEMA) await run(text, []);
+
+  const bilan = await migrerDepuisMultiComptes(run);
+  if (bilan.migre) console.info("[base] migration vers le propriétaire unique :", bilan.detail);
 }
 
 /** Exécute une requête et renvoie les lignes. */
@@ -185,31 +188,18 @@ export async function transaction(statements: Statement[]): Promise<void> {
 }
 
 const SCHEMA: string[] = [
-  `CREATE TABLE IF NOT EXISTS users (
-     id            integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-     email         text NOT NULL UNIQUE,
-     password_hash text NOT NULL,
-     created_at    timestamptz NOT NULL DEFAULT now()
-   )`,
-  `CREATE TABLE IF NOT EXISTS sessions (
-     token      text PRIMARY KEY,
-     user_id    integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-     expires_at timestamptz NOT NULL
-   )`,
-  `CREATE TABLE IF NOT EXISTS portfolios (
-     user_id       integer PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  // Portefeuille unique : une seule ligne, verrouillée par la contrainte id = 1.
+  `CREATE TABLE IF NOT EXISTS owner_portfolio (
+     id            smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
      cash          double precision NOT NULL,
      start_capital double precision NOT NULL
    )`,
-  `CREATE TABLE IF NOT EXISTS positions (
-     user_id  integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-     asset    text NOT NULL,
-     quantity double precision NOT NULL,
-     PRIMARY KEY (user_id, asset)
+  `CREATE TABLE IF NOT EXISTS owner_positions (
+     asset    text PRIMARY KEY,
+     quantity double precision NOT NULL
    )`,
-  `CREATE TABLE IF NOT EXISTS orders (
+  `CREATE TABLE IF NOT EXISTS owner_orders (
      id         integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-     user_id    integer NOT NULL REFERENCES users(id) ON DELETE CASCADE,
      asset      text NOT NULL,
      side       text NOT NULL CHECK (side IN ('buy','sell')),
      quantity   double precision NOT NULL,
@@ -218,8 +208,8 @@ const SCHEMA: string[] = [
      source     text NOT NULL DEFAULT 'manuel',
      created_at timestamptz NOT NULL DEFAULT now()
    )`,
-  `CREATE TABLE IF NOT EXISTS bots (
-     user_id        integer PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  `CREATE TABLE IF NOT EXISTS owner_bot (
+     id             smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
      asset          text NOT NULL,
      strategy       text NOT NULL,
      fast           integer NOT NULL DEFAULT 20,
@@ -239,3 +229,81 @@ const SCHEMA: string[] = [
      PRIMARY KEY (asset, day)
    )`,
 ];
+
+/**
+ * Migration depuis l'ancien schéma multi-comptes.
+ *
+ * Le site n'a plus qu'un propriétaire. Si la base contient encore les
+ * anciennes tables, on récupère le portefeuille du PREMIER compte créé puis
+ * on supprime tout ce qui concerne les comptes e-mail.
+ *
+ * Idempotente : rejouée sur une base déjà migrée, elle ne fait rien.
+ * Aucune réinitialisation de la base Neon n'est donc nécessaire.
+ */
+async function migrerDepuisMultiComptes(
+  run: Runner,
+): Promise<{ migre: boolean; detail: string }> {
+  const existe = async (table: string) => {
+    const r = await run(
+      `SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = $1`,
+      [table],
+    );
+    return r.length > 0;
+  };
+
+  if (!(await existe("portfolios"))) return { migre: false, detail: "rien à migrer" };
+
+  const dejaRempli = await run("SELECT 1 FROM owner_portfolio LIMIT 1", []);
+  let detail = "anciennes tables supprimées";
+
+  if (dejaRempli.length === 0) {
+    // Le plus ancien compte devient le propriétaire.
+    const proprio = await run(
+      "SELECT user_id FROM portfolios ORDER BY user_id ASC LIMIT 1",
+      [],
+    );
+    const uid = proprio[0]?.user_id;
+
+    if (uid !== undefined) {
+      await run(
+        `INSERT INTO owner_portfolio (id, cash, start_capital)
+         SELECT 1, cash, start_capital FROM portfolios WHERE user_id = $1`,
+        [uid],
+      );
+      if (await existe("positions")) {
+        await run(
+          `INSERT INTO owner_positions (asset, quantity)
+           SELECT asset, quantity FROM positions WHERE user_id = $1
+           ON CONFLICT (asset) DO NOTHING`,
+          [uid],
+        );
+      }
+      if (await existe("orders")) {
+        await run(
+          `INSERT INTO owner_orders (asset, side, quantity, price, fee, source, created_at)
+           SELECT asset, side, quantity, price, fee, source, created_at
+           FROM orders WHERE user_id = $1 ORDER BY id ASC`,
+          [uid],
+        );
+      }
+      if (await existe("bots")) {
+        await run(
+          `INSERT INTO owner_bot (id, asset, strategy, fast, slow, max_loss_pct, enabled, stopped_reason)
+           SELECT 1, asset, strategy, fast, slow, max_loss_pct, enabled, stopped_reason
+           FROM bots WHERE user_id = $1
+           ON CONFLICT (id) DO NOTHING`,
+          [uid],
+        );
+      }
+      detail = "portefeuille du premier compte repris, anciennes tables supprimées";
+    }
+  }
+
+  // Suppression dans l'ordre des dépendances.
+  for (const t of ["orders", "positions", "portfolios", "bots", "sessions", "users"]) {
+    await run(`DROP TABLE IF EXISTS ${t} CASCADE`, []);
+  }
+
+  return { migre: true, detail };
+}

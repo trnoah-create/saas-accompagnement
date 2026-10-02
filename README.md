@@ -38,8 +38,26 @@ Les prix sont mis en cache en base pendant une heure. **Si le réseau est bloqu�
 rester utilisable — et affiche alors un bandeau rouge « Données de démonstration ».
 Ces prix n'ont aucune valeur historique.
 
+### Accès
+Le site entier est protégé par **un seul mot de passe**, lu dans la variable
+d'environnement `SITE_PASSWORD`. Il n'y a ni inscription, ni comptes, ni
+adresses e-mail : un seul propriétaire, un seul portefeuille.
+
+Le verrou est posé dans `proxy.ts`, qui s'exécute avant toute page et toute
+route d'API — c'est ce qui garantit qu'aucune adresse ne puisse être atteinte
+sans le mot de passe. Les Server Actions revérifient de leur côté : on ne
+s'appuie jamais sur une barrière unique.
+
+La session est un jeton **signé** (HMAC-SHA256, clé = `SITE_PASSWORD`) déposé
+dans un cookie `httpOnly`, donc inaccessible au JavaScript du navigateur. Rien
+n'est stocké en base. Conséquence utile : changer `SITE_PASSWORD` déconnecte
+instantanément toutes les sessions.
+
+Si `SITE_PASSWORD` est absente, le site est entièrement verrouillé et la page
+d'accès explique quoi faire — aucun accès de secours n'existe.
+
 ### Portefeuille fictif
-Chaque compte démarre avec **1 000 € virtuels**. Achat et vente au dernier prix connu,
+Le portefeuille unique démarre avec **1 000 € virtuels**. Achat et vente au dernier prix connu,
 avec des **frais de 0,1 % par ordre**. Tout l'historique est conservé.
 
 ### Backtest
@@ -72,16 +90,19 @@ expliquant pourquoi. Même règle anti-triche que le backtest.
 ## Structure
 
 ```
+proxy.ts              Verrou global : aucune page sans mot de passe
 app/
   page.tsx            Accueil
-  connexion/ inscription/
+  connexion/          Saisie du mot de passe
   tableau-de-bord/    Portefeuille, ordres, graphiques
   backtest/           Test d'une stratégie
   comparateur/        Tous les actifs × toutes les stratégies
   bot/                Réglages et exécution du bot
   diagnostic/         Vérification base + prix, à ouvrir après déploiement
 lib/
-  db.ts               Base PostgreSQL (schéma, requêtes, transactions)
+  db.ts               Base PostgreSQL (schéma, migration, transactions)
+  session.ts          Mot de passe unique et jeton de session signé
+  acces.ts            Ouverture et fermeture de session (cookie)
   health.ts           Contrôles affichés sur /diagnostic
   auth.ts             Comptes, mots de passe, sessions
   portfolio.ts        Achat, vente, frais, historique
@@ -90,6 +111,7 @@ lib/
   market/             Actifs, téléchargement des prix, cache, démo
   engine/             Stratégies et moteur de backtest
 tests/engine.test.ts  Tests du moteur (anti-triche, frais, calculs)
+tests/session.test.ts Tests du mot de passe et des jetons de session
 tests/db.test.ts      Tests SQL contre un vrai PostgreSQL en mémoire
 tests/pg-local.mjs    Serveur PostgreSQL local pour le développement
 ```
@@ -140,7 +162,20 @@ Mets-y `main` si tu as fusionné à l'étape 1, sinon `simulateur-trading`.
 Si tu as dû la changer, va dans **Deployments** → bouton `⋯` du dernier
 déploiement → **Redeploy**.
 
-### Étape 4 — Brancher la base de données gratuite
+### Étape 4 — Choisir le mot de passe du site
+
+1. Dans ton projet Vercel → **Settings** → **Environment Variables**.
+2. *Key* : `SITE_PASSWORD`
+3. *Value* : le mot de passe de ton choix (long et unique, c'est la seule
+   protection du site).
+4. Coche les trois environnements proposés (*Production*, *Preview*,
+   *Development*) → **Save**.
+
+Ce mot de passe n'est écrit nulle part dans le code ni sur GitHub : il ne vit
+que dans Vercel. Si tu le changes, tu seras déconnecté et devras ressaisir le
+nouveau.
+
+### Étape 5 — Brancher la base de données gratuite
 
 1. Dans ton projet Vercel → onglet **Storage**.
 2. **Create Database** → choisis **Neon** (PostgreSQL) → *Continue*.
@@ -150,17 +185,18 @@ déploiement → **Redeploy**.
 Vercel ajoute alors tout seul la variable `DATABASE_URL`. Tu n'as aucune
 adresse à recopier — ce qui évite les fautes de frappe sur un téléphone.
 
-### Étape 5 — Redéployer
+### Étape 6 — Redéployer
 
 **Deployments** → bouton `⋯` sur le déploiement le plus récent → **Redeploy**.
-C'est nécessaire pour que le site voie la nouvelle variable.
+C'est nécessaire pour que le site voie les nouvelles variables.
 
-### Étape 6 — Vérifier que tout marche
+### Étape 7 — Vérifier que tout marche
 
 Ouvre **`https://ton-site.vercel.app/diagnostic`** sur ton téléphone.
 
-Cette page te dit en clair, sans jargon :
+Le mot de passe te sera demandé. Cette page te dit ensuite en clair :
 
+- ✅ **Mot de passe du site : configuré** → le site est bien protégé ;
 - ✅ **Base de données : connectée** → les comptes seront bien enregistrés ;
 - ✅ **Prix de marché : les 4 actifs reçoivent de vrais prix** → Binance et
   Stooq répondent correctement.
@@ -172,6 +208,7 @@ tes 1 000 € fictifs.
 
 | Ce que tu vois | Ce qu'il faut faire |
 |---|---|
+| « Site pas encore configuré » sur la page d'accès | `SITE_PASSWORD` manque (étape 4), ou tu n'as pas redéployé (étape 6). |
 | « Base de données : pas encore connectée » | L'étape 4 n'a pas abouti, ou tu n'as pas redéployé (étape 5). |
 | « Base configurée mais injoignable » | La base Neon est peut-être en veille : recharge la page une fois. |
 | « Démonstration » sur les prix | Les prix affichés sont **inventés**. Recharge dans une minute ; si ça persiste, Binance ou Stooq sont momentanément indisponibles. |

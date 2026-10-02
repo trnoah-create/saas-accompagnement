@@ -7,13 +7,13 @@ import { siteConfig } from "@/config/site";
 import { Logo } from "./logo";
 import { ThemeToggle } from "./theme-toggle";
 
-export function Header({ user }: { user: { email: string } | null }) {
+export function Header({ connecte }: { connecte: boolean }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
 
   useEffect(() => setOpen(false), [pathname]);
 
-  const liens = user ? [...siteConfig.nav, ...siteConfig.navPrivee] : [...siteConfig.nav];
+  const liens = connecte ? [...siteConfig.nav, ...siteConfig.navPrivee] : [];
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);
 
@@ -44,7 +44,7 @@ export function Header({ user }: { user: { email: string } | null }) {
 
         <div className="flex items-center gap-2">
           <ThemeToggle />
-          {user ? (
+          {connecte ? (
             <form action="/api/deconnexion" method="post" className="hidden lg:block">
               <button
                 type="submit"
@@ -90,7 +90,7 @@ export function Header({ user }: { user: { email: string } | null }) {
               </li>
             ))}
             <li>
-              {user ? (
+              {connecte ? (
                 <form action="/api/deconnexion" method="post">
                   <button type="submit"
                           className="w-full cursor-pointer rounded-lg px-3 py-2.5 text-left text-sm font-medium text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800">

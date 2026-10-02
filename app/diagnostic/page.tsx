@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { etatBase, etatActifs } from "@/lib/health";
+import { etatBase, etatActifs, etatAcces } from "@/lib/health";
 import { prix } from "@/lib/format";
 
 export const metadata: Metadata = { title: "Diagnostic", robots: { index: false } };
@@ -21,11 +21,12 @@ function Pastille({ ok, texte }: { ok: boolean; texte: string }) {
 }
 
 export default async function Page() {
+  const acces = etatAcces();
   const base = await etatBase();
   const actifs = await etatActifs();
 
   const prixReels = actifs.filter((a) => a.reel).length;
-  const toutVaBien = base.joignable && prixReels === actifs.length;
+  const toutVaBien = acces.configure && base.joignable && prixReels === actifs.length;
 
   return (
     <div className="container-page py-10">
@@ -47,6 +48,12 @@ export default async function Page() {
         </h2>
         <ul className="mt-3 space-y-1.5 text-sm">
           <li>
+            {acces.configure ? "✅" : "❌"} Mot de passe du site :{" "}
+            {acces.configure
+              ? "configuré, le site est protégé"
+              : "SITE_PASSWORD manquante, le site est inaccessible"}
+          </li>
+          <li>
             {base.joignable ? "✅" : "❌"} Base de données :{" "}
             {base.joignable
               ? "connectée, les comptes seront bien enregistrés"
@@ -67,6 +74,19 @@ export default async function Page() {
             section « Mettre le site en ligne depuis un téléphone ».
           </p>
         )}
+      </div>
+
+      {/* Accès */}
+      <h2 className="mt-10 text-xl font-bold">Mot de passe du site</h2>
+      <div className="mt-4 rounded-2xl border border-slate-200 p-5 dark:border-slate-800">
+        <Pastille
+          ok={acces.configure}
+          texte={acces.configure ? "SITE_PASSWORD définie" : "SITE_PASSWORD absente"}
+        />
+        <p className="mt-3 text-sm text-slate-600 dark:text-slate-400">{acces.detail}</p>
+        <p className="mt-2 text-xs text-slate-500">
+          La valeur du mot de passe n&apos;est jamais affichée ici.
+        </p>
       </div>
 
       {/* Base */}

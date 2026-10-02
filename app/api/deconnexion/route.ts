@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { logout } from "@/lib/auth";
+import { fermerSession } from "@/lib/acces";
 
 export async function POST(request: Request) {
-  await logout();
-  return NextResponse.redirect(new URL("/", request.url), { status: 303 });
+  await fermerSession();
+  return NextResponse.redirect(new URL("/connexion", request.url), { status: 303 });
 }

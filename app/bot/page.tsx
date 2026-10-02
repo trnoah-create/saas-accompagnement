@@ -1,6 +1,4 @@
 import type { Metadata } from "next";
-import { redirect } from "next/navigation";
-import { currentUser } from "@/lib/auth";
 import { getBot } from "@/lib/bot";
 import { getPortfolio } from "@/lib/portfolio";
 import { ASSETS } from "@/lib/market";
@@ -13,11 +11,8 @@ export const metadata: Metadata = { title: "Bot" };
 export const dynamic = "force-dynamic";
 
 export default async function Page() {
-  const user = await currentUser();
-  if (!user) redirect("/connexion");
-
-  const config = await getBot(user.id);
-  const portefeuille = await getPortfolio(user.id);
+  const config = await getBot();
+  const portefeuille = await getPortfolio();
   const seuil = portefeuille.startCapital * (1 - config.max_loss_pct / 100);
 
   return (

@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { currentUser } from "@/lib/auth";
+import { connecte } from "@/lib/acces";
 import { buy, sell, resetPortfolio } from "@/lib/portfolio";
 import { saveBot, runBot } from "@/lib/bot";
 import type { AssetId } from "@/lib/market";
@@ -9,12 +9,19 @@ import type { StrategyId } from "@/lib/engine/strategies";
 
 export type ActionState = { error?: string; ok?: string };
 
-export async function actionAchat(_p: ActionState, fd: FormData): Promise<ActionState> {
-  const user = await currentUser();
-  if (!user) return { error: "Connecte-toi pour passer un ordre." };
+/**
+ * Deuxième verrou. proxy.ts bloque déjà les requêtes sans mot de passe,
+ * mais une Server Action doit vérifier elle-même : c'est le principe de
+ * ne jamais faire confiance à une seule barrière.
+ */
+async function autorise(): Promise<boolean> {
+  return connecte();
+}
 
+export async function actionAchat(_p: ActionState, fd: FormData): Promise<ActionState> {
+  if (!(await autorise())) return { error: "Accès refusé." };
   try {
-    await buy(user.id, String(fd.get("asset")) as AssetId, Number(fd.get("amount")));
+    await buy(String(fd.get("asset")) as AssetId, Number(fd.get("amount")));
   } catch (e) {
     return { error: (e as Error).message };
   }
@@ -23,11 +30,9 @@ export async function actionAchat(_p: ActionState, fd: FormData): Promise<Action
 }
 
 export async function actionVente(_p: ActionState, fd: FormData): Promise<ActionState> {
-  const user = await currentUser();
-  if (!user) return { error: "Connecte-toi pour passer un ordre." };
-
+  if (!(await autorise())) return { error: "Accès refusé." };
   try {
-    await sell(user.id, String(fd.get("asset")) as AssetId, Number(fd.get("quantity")));
+    await sell(String(fd.get("asset")) as AssetId, Number(fd.get("quantity")));
   } catch (e) {
     return { error: (e as Error).message };
   }
@@ -36,17 +41,15 @@ export async function actionVente(_p: ActionState, fd: FormData): Promise<Action
 }
 
 export async function actionReset(): Promise<void> {
-  const user = await currentUser();
-  if (!user) return;
-  await resetPortfolio(user.id);
+  if (!(await autorise())) return;
+  await resetPortfolio();
   revalidatePath("/tableau-de-bord");
 }
 
 export async function actionBot(_p: ActionState, fd: FormData): Promise<ActionState> {
-  const user = await currentUser();
-  if (!user) return { error: "Connecte-toi d'abord." };
+  if (!(await autorise())) return { error: "Accès refusé." };
 
-  await saveBot(user.id, {
+  await saveBot({
     asset: String(fd.get("asset")) as AssetId,
     strategy: String(fd.get("strategy")) as StrategyId,
     fast: Number(fd.get("fast")),
@@ -60,10 +63,9 @@ export async function actionBot(_p: ActionState, fd: FormData): Promise<ActionSt
 }
 
 export async function actionRunBot(_p: ActionState): Promise<ActionState> {
-  const user = await currentUser();
-  if (!user) return { error: "Connecte-toi d'abord." };
+  if (!(await autorise())) return { error: "Accès refusé." };
 
-  const r = await runBot(user.id);
+  const r = await runBot();
   revalidatePath("/bot");
   revalidatePath("/tableau-de-bord");
   return { ok: `${r.action.toUpperCase()} — ${r.message}` };
