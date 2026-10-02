@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { historique, enPause } from "@/lib/claude-trader/run";
 import { courtier } from "@/lib/broker";
 import { cleConfiguree } from "@/lib/claude-trader/decide";
-import { CLAUDE_TRADER, START_CAPITAL } from "@/lib/constants";
+import { claudeTraderConfig as cfg } from "@/config/claude-trader";
 import { ClaudePause } from "@/components/claude-pause";
 import { DisclaimerNote } from "@/components/disclaimer";
 import { LineChart } from "@/components/chart";
@@ -16,9 +16,22 @@ const LIBELLES: Record<string, { texte: string; classe: string }> = {
   ordres: { texte: "Ordres passés", classe: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300" },
   aucun_ordre: { texte: "Aucun ordre", classe: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300" },
   en_pause: { texte: "En pause", classe: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300" },
-  stop_perte: { texte: "Stop de perte", classe: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300" },
+  blocage_jour: { texte: "Blocage du jour", classe: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300" },
+  pause_auto: { texte: "Pause automatique", classe: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300" },
   echec: { texte: "Échec", classe: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300" },
 };
+
+function Limite({ label, valeur, seuil }: { label: string; valeur: number | null; seuil: number }) {
+  const atteint = valeur !== null && valeur >= seuil;
+  return (
+    <div className="rounded-xl border border-slate-200 px-4 py-3 dark:border-slate-800">
+      <div className="text-xs text-slate-500">{label}</div>
+      <div className={`mt-1 text-sm font-semibold ${atteint ? "text-red-600 dark:text-red-400" : ""}`}>
+        {valeur === null ? "—" : euro(Math.max(valeur, 0))} / {euro(seuil)}
+      </div>
+    </div>
+  );
+}
 
 export default async function Page() {
   const comptes = await historique(60);
@@ -63,6 +76,23 @@ export default async function Page() {
         </span>
       </div>
 
+      {/* Le cadre, appliqué par le code */}
+      <h2 className="mt-10 text-xl font-bold">Le cadre</h2>
+      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+        Ces limites sont appliquées par le code, jamais par le modèle. Un ordre qui les dépasse est
+        refusé même si Claude le propose.
+      </p>
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Limite label="Perte du jour (alerte)" valeur={dernier?.detail?.pertes?.jour ?? null} seuil={cfg.pertes.alerteJour} />
+        <Limite label="Perte du jour (blocage)" valeur={dernier?.detail?.pertes?.jour ?? null} seuil={cfg.pertes.blocageJour} />
+        <Limite label="Perte de la semaine" valeur={dernier?.detail?.pertes?.semaine ?? null} seuil={cfg.pertes.semaine} />
+        <Limite label="Perte du mois" valeur={dernier?.detail?.pertes?.mois ?? null} seuil={cfg.pertes.mois} />
+      </div>
+      <p className="mt-3 text-xs text-slate-500">
+        Journées découpées de minuit à minuit, heure de {cfg.fuseau.replace("Europe/", "")}. Au-delà
+        de la limite hebdomadaire ou mensuelle, le mode se met en pause et attend ta réactivation.
+      </p>
+
       {!cle && (
         <p
           role="alert"
@@ -104,9 +134,10 @@ export default async function Page() {
             ))}
           </div>
           <p className="mt-3 text-xs text-slate-500">
-            Capital de départ : {euro(START_CAPITAL)} · plafond par ordre :{" "}
-            {CLAUDE_TRADER.maxOrdrePct} % · stop de perte quotidien :{" "}
-            {CLAUDE_TRADER.maxPerteJourPct} %
+            Capital de départ : {euro(cfg.capitalDepart)} · montant par ordre :{" "}
+            {euro(cfg.ordres.montantMaxEuros)} maximum · {cfg.ordres.maxParJour} ordres par jour ·{" "}
+            {cfg.ordres.partMaxParActifPct} % maximum par actif · frais {cfg.couts.fraisPct} % et
+            écart achat/vente {cfg.couts.ecartPct} %
           </p>
         </>
       )}
@@ -153,6 +184,12 @@ export default async function Page() {
                   </p>
                 )}
 
+                {c.detail.alerte && (
+                  <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+                    ⚠️ {c.detail.alerte}
+                  </p>
+                )}
+
                 {c.detail.analyse && (
                   <p className="mt-3 border-l-2 border-slate-300 pl-3 text-sm text-slate-600 italic dark:border-slate-700 dark:text-slate-400">
                     {c.detail.analyse}
@@ -172,7 +209,8 @@ export default async function Page() {
                           >
                             {o.side === "buy" ? "Achat" : "Vente"}
                           </span>{" "}
-                          {quantite(o.quantity)} {o.asset} à {prix(o.price)} (frais {euro(o.fee)})
+                          {euro(o.montant)} de {o.asset} — {quantite(o.quantity)} à {prix(o.price)}{" "}
+                          (frais {euro(o.fee)}, prix affiché {prix(o.prixMarche)})
                           <div className="text-slate-600 dark:text-slate-400">{o.reason}</div>
                         </li>
                       ))}
@@ -189,7 +227,7 @@ export default async function Page() {
                       {c.detail.refuses.map((o, i) => (
                         <li key={i} className="text-sm">
                           <span className="font-medium">
-                            {o.side === "buy" || o.side === "achat" ? "Achat" : "Vente"} {o.asset}
+                            {o.side === "buy" || o.side === "achat" ? "Achat" : "Vente"} {euro(o.montant)} de {o.asset}
                           </span>{" "}
                           — <span className="text-red-700 dark:text-red-400">{o.motifRefus}</span>
                         </li>

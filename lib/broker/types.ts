@@ -2,29 +2,31 @@
  * Interface « courtier ».
  *
  * ⚠️ Un seul courtier existe : la simulation. Aucun code de ce dépôt ne
- * parle à un vrai courtier, ne détient d'identifiants bancaires et ne peut
- * engager d'argent réel. L'interface sert à rendre cette frontière
- * explicite et vérifiable, pas à préparer un branchement automatique.
+ * parle à un vrai courtier, ne détient d'identifiants et ne peut engager
+ * d'argent réel. L'interface rend cette frontière explicite et vérifiable.
  */
-import type { AssetId } from "../market/assets";
 
 export type Sens = "buy" | "sell";
 
-/** Ordre demandé, avant toute vérification. */
+/** Ordre à exécuter, exprimé en montant de marché (euros). */
 export type OrdreDemande = {
-  asset: AssetId;
+  asset: string;
   side: Sens;
-  /** Quantité d'actif. */
-  quantity: number;
-  /** Justification, reprise dans le compte rendu. */
+  montant: number;
   reason: string;
 };
 
 export type OrdreExecute = {
   asset: string;
   side: Sens;
+  /** Montant de marché engagé. */
+  montant: number;
+  /** Quantité d'actif effectivement échangée. */
   quantity: number;
+  /** Prix réellement obtenu, écart achat/vente inclus. */
   price: number;
+  /** Prix affiché au moment de l'ordre, avant écart. */
+  prixMarche: number;
   fee: number;
   reason: string;
 };
@@ -32,9 +34,8 @@ export type OrdreExecute = {
 export type OrdreRefuse = {
   asset: string;
   side: string;
-  quantity: number;
+  montant: number;
   reason: string;
-  /** Pourquoi l'ordre a été refusé. */
   motifRefus: string;
 };
 
@@ -46,7 +47,6 @@ export type EtatCompte = {
 };
 
 export interface Courtier {
-  /** Nom affiché dans l'interface et les comptes rendus. */
   readonly nom: string;
   /** true signifierait de l'argent réel. Toujours false ici. */
   readonly reel: false;

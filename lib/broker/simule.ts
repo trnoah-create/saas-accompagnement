@@ -1,21 +1,22 @@
 /**
  * Courtier simulé — la SEULE implémentation existante.
  *
- * Tout est fictif : aucun appel réseau vers un courtier, aucun identifiant,
- * aucun mouvement d'argent réel. Les ordres ne font que modifier des lignes
- * dans la base de données du site.
+ * Tout est fictif : aucun appel vers un courtier, aucun identifiant, aucun
+ * mouvement d'argent réel. Un ordre ne fait que modifier des lignes dans la
+ * base du site. Les coûts (frais et écart achat/vente) viennent de
+ * config/claude-trader.ts.
  */
 import "server-only";
 import { query, queryOne, transaction } from "../db";
-import { FEE_RATE, START_CAPITAL } from "../constants";
-import { ASSET_IDS, getLastPrice, type AssetId } from "../market";
+import { claudeTraderConfig, frais, prixAchat, prixVente } from "../../config/claude-trader";
+import { getLastPrice, type AssetId } from "../market";
 import type { Courtier, EtatCompte, OrdreDemande, OrdreExecute } from "./types";
 
 async function assurerCompte(): Promise<void> {
   await query(
     `INSERT INTO claude_portfolio (id, cash, start_capital) VALUES (1, $1, $1)
      ON CONFLICT (id) DO NOTHING`,
-    [START_CAPITAL],
+    [claudeTraderConfig.capitalDepart],
   );
 }
 
@@ -54,17 +55,21 @@ export const courtierSimule: Courtier = {
   },
 
   async passerOrdre(ordre: OrdreDemande): Promise<OrdreExecute> {
-    if (!ASSET_IDS.includes(ordre.asset)) throw new Error("Actif inconnu.");
-    if (!Number.isFinite(ordre.quantity) || ordre.quantity <= 0) {
-      throw new Error("Quantité invalide.");
+    if (!claudeTraderConfig.actifsAutorises.includes(ordre.asset as never)) {
+      throw new Error("Actif non autorisé.");
+    }
+    if (!Number.isFinite(ordre.montant) || ordre.montant <= 0) {
+      throw new Error("Montant invalide.");
     }
 
-    const { price } = await getLastPrice(ordre.asset);
+    const { price: prixMarche } = await getLastPrice(ordre.asset as AssetId);
+    const fee = frais(ordre.montant);
 
     if (ordre.side === "buy") {
-      const brut = ordre.quantity * price;
-      const fee = brut * FEE_RATE;
-      const cout = brut + fee;
+      // On achète un peu au-dessus du prix affiché.
+      const price = prixAchat(prixMarche);
+      const quantity = ordre.montant / price;
+      const cout = ordre.montant + fee;
 
       const row = await queryOne<{ cash: number }>(
         "SELECT cash FROM claude_portfolio WHERE id = 1",
@@ -74,53 +79,52 @@ export const courtierSimule: Courtier = {
       }
 
       await transaction([
-        {
-          text: "UPDATE claude_portfolio SET cash = cash - $1 WHERE id = 1",
-          params: [cout],
-        },
+        { text: "UPDATE claude_portfolio SET cash = cash - $1 WHERE id = 1", params: [cout] },
         {
           text: `INSERT INTO claude_positions (asset, quantity) VALUES ($1, $2)
                  ON CONFLICT (asset) DO UPDATE SET quantity = claude_positions.quantity + EXCLUDED.quantity`,
-          params: [ordre.asset, ordre.quantity],
+          params: [ordre.asset, quantity],
         },
         {
           text: `INSERT INTO claude_orders (asset, side, quantity, price, fee, reason)
                  VALUES ($1, 'buy', $2, $3, $4, $5)`,
-          params: [ordre.asset, ordre.quantity, price, fee, ordre.reason],
+          params: [ordre.asset, quantity, price, fee, ordre.reason],
         },
       ]);
 
-      return { asset: ordre.asset, side: "buy", quantity: ordre.quantity, price, fee, reason: ordre.reason };
+      return { ...ordre, side: "buy", quantity, price, prixMarche, fee };
     }
+
+    // Vente : on vend un peu en dessous du prix affiché.
+    const price = prixVente(prixMarche);
+    const quantity = ordre.montant / price;
 
     const pos = await queryOne<{ quantity: number }>(
       "SELECT quantity FROM claude_positions WHERE asset = $1",
       [ordre.asset],
     );
     const detenu = pos ? Number(pos.quantity) : 0;
-    if (ordre.quantity > detenu + 1e-12) {
+    // Pas de vente à découvert.
+    if (quantity > detenu + 1e-12) {
       throw new Error("Quantité supérieure à la position détenue.");
     }
-
-    const brut = ordre.quantity * price;
-    const fee = brut * FEE_RATE;
 
     await transaction([
       {
         text: "UPDATE claude_portfolio SET cash = cash + $1 WHERE id = 1",
-        params: [brut - fee],
+        params: [ordre.montant - fee],
       },
       {
         text: "UPDATE claude_positions SET quantity = quantity - $1 WHERE asset = $2",
-        params: [ordre.quantity, ordre.asset],
+        params: [quantity, ordre.asset],
       },
       {
         text: `INSERT INTO claude_orders (asset, side, quantity, price, fee, reason)
                VALUES ($1, 'sell', $2, $3, $4, $5)`,
-        params: [ordre.asset, ordre.quantity, price, fee, ordre.reason],
+        params: [ordre.asset, quantity, price, fee, ordre.reason],
       },
     ]);
 
-    return { asset: ordre.asset, side: "sell", quantity: ordre.quantity, price, fee, reason: ordre.reason };
+    return { ...ordre, side: "sell", quantity, price, prixMarche, fee };
   },
 };

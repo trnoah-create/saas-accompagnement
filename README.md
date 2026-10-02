@@ -104,22 +104,51 @@ ordres** avant le point de divergence.
 
 ### Mode « Claude trader »
 
-Chaque jour, une tâche planifiée par Vercel Cron rassemble les prix récents et
-l'état d'un **portefeuille fictif dédié** (distinct du tien), demande au modèle
-une liste d'ordres au format strictement imposé, puis :
+Un portefeuille fictif **distinct du tien**, doté de **100 €**, piloté chaque jour
+par le modèle — mais encadré par des règles que le code applique lui-même.
 
-1. **valide** chaque ordre — actif connu, quantité positive, liquidités
-   suffisantes, position détenue, plafond par ordre ;
-2. **exécute** ceux qui passent, via le courtier simulé, frais de 0,1 % ;
-3. **écrit un compte rendu** en français : ordres et justifications, valeur du
-   portefeuille, gain du jour, comparaison avec un témoin « acheter et garder »
-   démarré le même jour avec le même capital.
+Tous les réglages sont dans un seul fichier :
+[`config/claude-trader.ts`](config/claude-trader.ts).
 
-Garde-fous : un ordre ne peut engager plus de 25 % du portefeuille, 6 ordres par
-jour au maximum, et au-delà de 5 % de perte depuis la veille plus aucun ordre
-n'est passé. **Si l'appel échoue ou si la réponse ne respecte pas le format,
-aucun ordre n'est passé** et la raison est consignée. Un bouton met le mode en
-pause.
+**Le cadre, appliqué par le code et jamais par le modèle :**
+
+| Règle | Valeur |
+|---|---|
+| Perte sur une journée | alerte à 2 €, **blocage à 3 €** |
+| Perte sur une semaine | 6 € → mise en pause |
+| Perte sur un mois | 15 € → mise en pause |
+| Montant par ordre | 1 € à 5 € |
+| Ordres par jour | 3 au maximum |
+| Part d'un seul actif | 40 % du portefeuille |
+| Actifs autorisés | Bitcoin, Ethereum, Dogecoin, S&P 500 |
+| Effet de levier, vente à découvert | interdits |
+| Coûts simulés | frais 0,1 % + écart achat/vente 0,1 % |
+
+Les journées vont de minuit à minuit **heure de Paris**, et les pertes se
+comptent en **euros**, pas en pourcentage. Après un blocage quotidien, le mode
+reprend le lendemain ; après une pause hebdomadaire ou mensuelle, il attend une
+**réactivation manuelle** via le bouton de la page.
+
+**Le déroulé de chaque journée**
+
+1. La tâche planifiée récupère les prix, l'historique récent et l'état du
+   portefeuille.
+2. Elle appelle l'API Anthropic avec la stratégie, le cadre, les prix, le
+   portefeuille et **les sept derniers comptes rendus** — le modèle n'a aucune
+   mémoire d'un jour à l'autre, tout lui est redonné.
+3. Le code **valide** chaque ordre contre le cadre et refuse ceux qui le
+   dépassent, même proposés par le modèle, puis exécute le reste.
+4. Un compte rendu est écrit : ordres passés et pourquoi, **ordres refusés et
+   pour quelle raison**, valeur du portefeuille, gain du jour, comparaison avec
+   un témoin « acheter et garder » lancé le même jour avec 100 €.
+
+« Ne rien faire » est une réponse valide, explicitement encouragée dans la
+consigne : sur un portefeuille de 100 €, les frais et l'écart achat/vente
+pénalisent l'agitation.
+
+**Si l'appel échoue ou si la réponse ne respecte pas le format imposé, aucun
+ordre n'est passé** et la raison figure dans le compte rendu. Un bouton met le
+mode en pause à tout moment.
 
 ### ⚠️ Aucun courtier réel
 
@@ -154,7 +183,7 @@ app/
 lib/
   db.ts               Base PostgreSQL (schéma, migration, transactions)
   broker/             Interface courtier — simulation uniquement
-  claude-trader/      Décision, validation, exécution, compte rendu
+  claude-trader/      Décision, validation, limites de perte, compte rendu
   session.ts          Mot de passe unique et jeton de session signé
   acces.ts            Ouverture et fermeture de session (cookie)
   health.ts           Contrôles affichés sur /diagnostic
@@ -167,7 +196,7 @@ lib/
 tests/engine.test.ts  Tests du moteur (anti-triche, frais, calculs)
 tests/session.test.ts Tests du mot de passe et des jetons de session
 tests/market.test.ts  Tests de la bascule entre sources et des analyseurs
-tests/claude-trader.test.ts  Tests de validation des ordres et des plafonds
+tests/claude-trader.test.ts  Tests des limites de perte et du cadre des ordres
 tests/db.test.ts      Tests SQL contre un vrai PostgreSQL en mémoire
 tests/pg-local.mjs    Serveur PostgreSQL local pour le développement
 ```

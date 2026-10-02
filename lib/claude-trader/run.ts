@@ -1,32 +1,55 @@
 /**
  * Exécution quotidienne du mode « Claude trader ».
  *
- * Enchaînement : état du portefeuille → contexte de marché → décision du
- * modèle → validation → exécution via le courtier simulé → compte rendu.
+ * Enchaînement : état du portefeuille → limites de perte → contexte de
+ * marché → décision du modèle → validation contre le cadre → exécution via
+ * le courtier simulé → compte rendu.
  *
- * À aucun moment un ordre réel n'est passé : le seul courtier disponible
- * est la simulation (voir lib/broker/index.ts).
+ * Aucun ordre réel n'est possible : le seul courtier est la simulation.
  */
 import "server-only";
 import { query, queryOne } from "../db";
-import { CLAUDE_TRADER, START_CAPITAL, FEE_RATE } from "../constants";
+import { claudeTraderConfig as cfg, frais } from "../../config/claude-trader";
 import { ASSETS, getLastPrice, type AssetId } from "../market";
 import { courtier } from "../broker";
 import type { OrdreExecute, OrdreRefuse } from "../broker";
-import { demanderDecision, rassemblerContexte } from "./decide";
-import { perteJourDepassee, validerOrdres, type Prix } from "./valider";
+import { demanderDecision, rassemblerContexte, type CompteRenduBref } from "./decide";
+import { validerOrdres, type Prix } from "./valider";
+import {
+  debutMois,
+  debutSemaine,
+  evaluerLimites,
+  jourLocal,
+  type Pertes,
+} from "./limites";
+
+export type Statut =
+  | "ordres"
+  | "aucun_ordre"
+  | "en_pause"
+  | "blocage_jour"
+  | "pause_auto"
+  | "echec";
 
 export type Compte = {
   day: string;
-  statut: "ordres" | "aucun_ordre" | "en_pause" | "stop_perte" | "echec";
+  statut: Statut;
   valeur: number | null;
   gain_jour_pct: number | null;
   valeur_temoin: number | null;
   temoin_gain_pct: number | null;
   resume: string;
-  detail: { executes: OrdreExecute[]; refuses: OrdreRefuse[]; analyse?: string };
+  detail: {
+    executes: OrdreExecute[];
+    refuses: OrdreRefuse[];
+    analyse?: string;
+    pertes?: Pertes;
+    alerte?: string;
+  };
   erreur: string | null;
 };
+
+// ─── Pause ───────────────────────────────────────────────────────────
 
 export async function enPause(): Promise<boolean> {
   const r = await queryOne<{ paused: number }>(
@@ -39,9 +62,36 @@ export async function mettreEnPause(pause: boolean): Promise<void> {
   await query(
     `INSERT INTO claude_portfolio (id, cash, start_capital, paused) VALUES (1, $2, $2, $1)
      ON CONFLICT (id) DO UPDATE SET paused = $1`,
-    [pause ? 1 : 0, START_CAPITAL],
+    [pause ? 1 : 0, cfg.capitalDepart],
   );
 }
+
+// ─── Valeurs quotidiennes ────────────────────────────────────────────
+
+/** Enregistre la valeur du jour et renvoie les valeurs d'ouverture. */
+async function suivreValeur(jour: string, valeur: number) {
+  await query(
+    `INSERT INTO claude_equity (day, open_value, close_value) VALUES ($1, $2, $2)
+     ON CONFLICT (day) DO UPDATE SET close_value = $2`,
+    [jour, valeur],
+  );
+
+  const ouverture = async (depuis: string): Promise<number | null> => {
+    const r = await queryOne<{ open_value: number }>(
+      `SELECT open_value FROM claude_equity WHERE day >= $1 ORDER BY day ASC LIMIT 1`,
+      [depuis],
+    );
+    return r ? Number(r.open_value) : null;
+  };
+
+  return {
+    jour: await ouverture(jour),
+    semaine: await ouverture(debutSemaine(jour)),
+    mois: await ouverture(debutMois(jour)),
+  };
+}
+
+// ─── Témoin « acheter et garder » ────────────────────────────────────
 
 async function prixCourants(): Promise<Prix> {
   const prix: Prix = {};
@@ -53,8 +103,8 @@ async function prixCourants(): Promise<Prix> {
 }
 
 /**
- * Portefeuille témoin « acheter et garder » : au premier jour, le capital
- * est réparti également entre les quatre actifs, puis plus rien ne bouge.
+ * Témoin figé au premier jour : le capital est réparti également entre les
+ * quatre actifs, frais inclus, puis plus rien ne bouge.
  */
 async function valeurTemoin(prix: Prix): Promise<number> {
   const existantes = await query<{ asset: string; quantity: number }>(
@@ -62,50 +112,40 @@ async function valeurTemoin(prix: Prix): Promise<number> {
   );
 
   if (existantes.length === 0) {
-    const part = START_CAPITAL / ASSETS.length;
+    const part = cfg.capitalDepart / ASSETS.length;
+    const investi = part - frais(part);
     for (const a of ASSETS) {
       const p = prix[a.id];
       if (!p) continue;
-      const quantite = (part - part * FEE_RATE) / p;
       await query(
         `INSERT INTO claude_benchmark (asset, quantity) VALUES ($1, $2)
          ON CONFLICT (asset) DO NOTHING`,
-        [a.id, quantite],
+        [a.id, investi / p],
       );
     }
-    return ASSETS.reduce((total, a) => {
-      const p = prix[a.id];
-      if (!p) return total;
-      return total + ((part - part * FEE_RATE) / p) * p;
-    }, 0);
+    return ASSETS.reduce((t, a) => (prix[a.id] ? t + investi : t), 0);
   }
 
   return existantes.reduce(
-    (total, b) => total + Number(b.quantity) * (prix[b.asset] ?? 0),
+    (t, b) => t + Number(b.quantity) * (prix[b.asset] ?? 0),
     0,
   );
 }
 
-async function valeurVeille(): Promise<number | null> {
-  const r = await queryOne<{ valeur: number }>(
-    `SELECT valeur FROM claude_reports
-     WHERE valeur IS NOT NULL AND day < CURRENT_DATE
-     ORDER BY day DESC LIMIT 1`,
-  );
-  return r ? Number(r.valeur) : null;
-}
+// ─── Comptes rendus ──────────────────────────────────────────────────
 
 async function enregistrer(c: Compte): Promise<void> {
   await query(
     `INSERT INTO claude_reports
        (day, statut, valeur, gain_jour_pct, valeur_temoin, temoin_gain_pct, resume, detail, erreur)
-     VALUES (CURRENT_DATE, $1, $2, $3, $4, $5, $6, $7, $8)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      ON CONFLICT (day) DO UPDATE SET
        statut = EXCLUDED.statut, valeur = EXCLUDED.valeur,
        gain_jour_pct = EXCLUDED.gain_jour_pct, valeur_temoin = EXCLUDED.valeur_temoin,
        temoin_gain_pct = EXCLUDED.temoin_gain_pct, resume = EXCLUDED.resume,
        detail = EXCLUDED.detail, erreur = EXCLUDED.erreur`,
     [
+      c.day,
       c.statut,
       c.valeur,
       c.gain_jour_pct,
@@ -118,17 +158,34 @@ async function enregistrer(c: Compte): Promise<void> {
   );
 }
 
-export async function executerJournee(): Promise<Compte> {
+async function derniersComptes(limite: number): Promise<CompteRenduBref[]> {
+  const rows = await query<Record<string, unknown>>(
+    `SELECT to_char(day, 'YYYY-MM-DD') AS day, statut, resume, valeur
+     FROM claude_reports ORDER BY day DESC LIMIT $1`,
+    [limite],
+  );
+  return rows
+    .map((r) => ({
+      day: String(r.day),
+      statut: String(r.statut),
+      resume: String(r.resume ?? ""),
+      valeur: r.valeur === null ? null : Number(r.valeur),
+    }))
+    .reverse();
+}
+
+// ─── Exécution d'une journée ─────────────────────────────────────────
+
+export async function executerJournee(maintenant = new Date()): Promise<Compte> {
   const broker = courtier();
 
-  // Ceinture et bretelles : si quelqu'un branchait un jour un courtier réel
-  // sans le vouloir, on s'arrête ici plutôt que d'engager de l'argent.
-  if (broker.reel) {
-    throw new Error("Courtier réel détecté : exécution refusée.");
-  }
+  // Ceinture et bretelles : si un courtier réel apparaissait un jour, on
+  // s'arrête ici plutôt que d'engager de l'argent.
+  if (broker.reel) throw new Error("Courtier réel détecté : exécution refusée.");
 
+  const jour = jourLocal(maintenant);
   const base: Omit<Compte, "statut" | "resume"> = {
-    day: new Date().toISOString().slice(0, 10),
+    day: jour,
     valeur: null,
     gain_jour_pct: null,
     valeur_temoin: null,
@@ -138,7 +195,11 @@ export async function executerJournee(): Promise<Compte> {
   };
 
   if (await enPause()) {
-    const c: Compte = { ...base, statut: "en_pause", resume: "Le mode est en pause : aucun ordre passé." };
+    const c: Compte = {
+      ...base,
+      statut: "en_pause",
+      resume: "Le mode est en pause : aucun ordre passé.",
+    };
     await enregistrer(c);
     return c;
   }
@@ -146,30 +207,52 @@ export async function executerJournee(): Promise<Compte> {
   const prix = await prixCourants();
   const etatAvant = await broker.etat();
   const temoin = await valeurTemoin(prix);
-  const veille = await valeurVeille();
+  const ouvertures = await suivreValeur(jour, etatAvant.totalValue);
 
   const chiffres = (valeur: number) => ({
     valeur,
-    gain_jour_pct: veille === null ? null : ((valeur - veille) / veille) * 100,
+    gain_jour_pct:
+      ouvertures.jour === null || ouvertures.jour === 0
+        ? null
+        : ((valeur - ouvertures.jour) / ouvertures.jour) * 100,
     valeur_temoin: temoin,
-    temoin_gain_pct: ((temoin - START_CAPITAL) / START_CAPITAL) * 100,
+    temoin_gain_pct: ((temoin - cfg.capitalDepart) / cfg.capitalDepart) * 100,
   });
 
-  // Garde-fou de perte quotidienne.
-  const perte = perteJourDepassee(etatAvant.totalValue, veille);
-  if (perte.depassee) {
+  // ── Limites de perte, appliquées avant toute décision ──
+  const limites = evaluerLimites(etatAvant.totalValue, ouvertures);
+
+  if (limites.action === "pause") {
+    await mettreEnPause(true);
     const c: Compte = {
       ...base,
       ...chiffres(etatAvant.totalValue),
-      statut: "stop_perte",
-      resume: `Perte de ${perte.pct!.toFixed(2)} % depuis la veille : le plafond de ${CLAUDE_TRADER.maxPerteJourPct} % est atteint, aucun ordre n'est passé aujourd'hui.`,
+      statut: "pause_auto",
+      resume: limites.motif,
+      detail: { executes: [], refuses: [], pertes: limites.pertes },
     };
     await enregistrer(c);
     return c;
   }
 
+  if (limites.action === "bloquer_jour") {
+    const c: Compte = {
+      ...base,
+      ...chiffres(etatAvant.totalValue),
+      statut: "blocage_jour",
+      resume: limites.motif,
+      detail: { executes: [], refuses: [], pertes: limites.pertes },
+    };
+    await enregistrer(c);
+    return c;
+  }
+
+  const alerte = limites.action === "alerte" ? limites.motif : undefined;
+
+  // ── Décision ──
   const marche = await rassemblerContexte();
-  const decision = await demanderDecision(marche, etatAvant);
+  const recents = await derniersComptes(cfg.comptesRendusTransmis);
+  const decision = await demanderDecision(marche, etatAvant, recents);
 
   // Échec d'appel ou réponse non conforme : AUCUN ordre.
   if (!decision.ok) {
@@ -178,16 +261,17 @@ export async function executerJournee(): Promise<Compte> {
       ...chiffres(etatAvant.totalValue),
       statut: "echec",
       resume: "Aucun ordre passé : la décision n'a pas pu être obtenue.",
+      detail: { executes: [], refuses: [], pertes: limites.pertes, alerte },
       erreur: decision.erreur,
     };
     await enregistrer(c);
     return c;
   }
 
+  // ── Validation puis exécution ──
   const { acceptes, refuses } = validerOrdres(decision.decision, etatAvant, prix);
-
   const executes: OrdreExecute[] = [];
-  const refusesFinaux = [...refuses];
+  const refusesFinaux: OrdreRefuse[] = [...refuses];
 
   for (const o of acceptes) {
     try {
@@ -196,7 +280,7 @@ export async function executerJournee(): Promise<Compte> {
       refusesFinaux.push({
         asset: o.asset,
         side: o.side,
-        quantity: o.quantity,
+        montant: o.montant,
         reason: o.reason,
         motifRefus: `Refusé à l'exécution : ${(e as Error).message}`,
       });
@@ -204,22 +288,34 @@ export async function executerJournee(): Promise<Compte> {
   }
 
   const etatApres = await broker.etat();
+  await suivreValeur(jour, etatApres.totalValue);
+
   const resume =
     executes.length === 0
-      ? "Aucun ordre passé aujourd'hui."
-      : `${executes.length} ordre(s) passé(s).` +
-        (refusesFinaux.length > 0 ? ` ${refusesFinaux.length} refusé(s).` : "");
+      ? refusesFinaux.length > 0
+        ? `Aucun ordre passé : ${refusesFinaux.length} proposition(s) refusée(s) par le cadre.`
+        : "Aucun ordre aujourd'hui."
+      : `${executes.length} ordre(s) passé(s)` +
+        (refusesFinaux.length > 0 ? `, ${refusesFinaux.length} refusé(s) par le cadre.` : ".");
 
   const c: Compte = {
     ...base,
     ...chiffres(etatApres.totalValue),
     statut: executes.length > 0 ? "ordres" : "aucun_ordre",
     resume,
-    detail: { executes, refuses: refusesFinaux, analyse: decision.decision.analyse },
+    detail: {
+      executes,
+      refuses: refusesFinaux,
+      analyse: decision.decision.analyse,
+      pertes: limites.pertes,
+      alerte,
+    },
   };
   await enregistrer(c);
   return c;
 }
+
+// ─── Lecture pour l'interface ────────────────────────────────────────
 
 export type CompteRenduLigne = Compte & { created_at: string };
 
@@ -234,7 +330,7 @@ export async function historique(limite = 60): Promise<CompteRenduLigne[]> {
 
   return rows.map((r) => ({
     day: String(r.day),
-    statut: r.statut as Compte["statut"],
+    statut: r.statut as Statut,
     valeur: r.valeur === null ? null : Number(r.valeur),
     gain_jour_pct: r.gain_jour_pct === null ? null : Number(r.gain_jour_pct),
     valeur_temoin: r.valeur_temoin === null ? null : Number(r.valeur_temoin),

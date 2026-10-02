@@ -124,6 +124,28 @@ async function creerSchema() {
 
   const bilan = await migrerDepuisMultiComptes(run);
   if (bilan.migre) console.info("[base] migration vers le propriétaire unique :", bilan.detail);
+
+  await alignerCapitalClaude(run);
+}
+
+/**
+ * Aligne le capital de départ du mode « Claude trader » sur la valeur
+ * configurée, tant qu'aucun ordre n'a été passé. Dès qu'un historique
+ * existe, on n'y touche plus : on ne réécrit jamais un passé réel.
+ */
+async function alignerCapitalClaude(run: Runner): Promise<void> {
+  const { claudeTraderConfig } = await import("../config/claude-trader");
+  const capital = claudeTraderConfig.capitalDepart;
+
+  const ordres = await run("SELECT 1 FROM claude_orders LIMIT 1", []);
+  if (ordres.length > 0) return;
+
+  await run(
+    `INSERT INTO claude_portfolio (id, cash, start_capital) VALUES (1, $1, $1)
+     ON CONFLICT (id) DO UPDATE SET cash = $1, start_capital = $1
+     WHERE claude_portfolio.start_capital <> $1`,
+    [capital],
+  );
 }
 
 /** Exécute une requête et renvoie les lignes. */
@@ -246,6 +268,13 @@ const SCHEMA: string[] = [
      asset    text PRIMARY KEY,
      quantity double precision NOT NULL
    )`,
+  // Valeur du portefeuille par journée (heure de Paris) : sert à mesurer
+  // les pertes du jour, de la semaine et du mois.
+  `CREATE TABLE IF NOT EXISTS claude_equity (
+     day         date PRIMARY KEY,
+     open_value  double precision NOT NULL,
+     close_value double precision NOT NULL
+   )`,
   // Un compte rendu par jour.
   `CREATE TABLE IF NOT EXISTS claude_reports (
      day              date PRIMARY KEY,
@@ -255,7 +284,7 @@ const SCHEMA: string[] = [
      valeur_temoin    double precision,
      temoin_gain_pct  double precision,
      resume           text NOT NULL DEFAULT '',
-     detail           text NOT NULL DEFAULT '[]',
+     detail           text NOT NULL DEFAULT '{}',
      erreur           text,
      created_at       timestamptz NOT NULL DEFAULT now()
    )`,
