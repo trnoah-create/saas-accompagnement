@@ -1,5 +1,5 @@
 import "server-only";
-import { db } from "./db";
+import { query, queryOne, transaction } from "./db";
 import { FEE_RATE, START_CAPITAL } from "./constants";
 import { ASSET_IDS, getLastPrice, type AssetId } from "./market";
 
@@ -12,7 +12,6 @@ export type Portfolio = {
   investedValue: number;
   totalValue: number;
   returnPct: number;
-  /** "demo" si au moins un prix vient des données factices. */
   priceSource: string;
 };
 
@@ -27,21 +26,27 @@ export type Order = {
   created_at: string;
 };
 
-function ensure(userId: number) {
-  db().prepare(
-    "INSERT OR IGNORE INTO portfolios (user_id, cash, start_capital) VALUES (?, ?, ?)",
-  ).run(userId, START_CAPITAL, START_CAPITAL);
+async function ensure(userId: number) {
+  await query(
+    `INSERT INTO portfolios (user_id, cash, start_capital) VALUES ($1, $2, $2)
+     ON CONFLICT (user_id) DO NOTHING`,
+    [userId, START_CAPITAL],
+  );
 }
 
 export async function getPortfolio(userId: number): Promise<Portfolio> {
-  ensure(userId);
-  const row = db()
-    .prepare("SELECT cash, start_capital FROM portfolios WHERE user_id = ?")
-    .get(userId) as { cash: number; start_capital: number };
+  await ensure(userId);
 
-  const held = db()
-    .prepare("SELECT asset, quantity FROM positions WHERE user_id = ? AND quantity > 0")
-    .all(userId) as { asset: string; quantity: number }[];
+  const row = await queryOne<{ cash: number; start_capital: number }>(
+    "SELECT cash, start_capital FROM portfolios WHERE user_id = $1",
+    [userId],
+  );
+  if (!row) throw new Error("Portefeuille introuvable.");
+
+  const held = await query<{ asset: string; quantity: number }>(
+    "SELECT asset, quantity FROM positions WHERE user_id = $1 AND quantity > 0",
+    [userId],
+  );
 
   const positions: Position[] = [];
   let investedValue = 0;
@@ -50,28 +55,32 @@ export async function getPortfolio(userId: number): Promise<Portfolio> {
   for (const h of held) {
     const { price, source: s } = await getLastPrice(h.asset as AssetId);
     if (s === "demo") source = "demo";
-    const value = h.quantity * price;
+    const value = Number(h.quantity) * price;
     investedValue += value;
-    positions.push({ asset: h.asset, quantity: h.quantity, price, value });
+    positions.push({ asset: h.asset, quantity: Number(h.quantity), price, value });
   }
 
-  const totalValue = row.cash + investedValue;
+  const cash = Number(row.cash);
+  const startCapital = Number(row.start_capital);
+  const totalValue = cash + investedValue;
+
   return {
-    cash: row.cash,
-    startCapital: row.start_capital,
+    cash,
+    startCapital,
     positions,
     investedValue,
     totalValue,
-    returnPct: ((totalValue - row.start_capital) / row.start_capital) * 100,
+    returnPct: ((totalValue - startCapital) / startCapital) * 100,
     priceSource: source || "marché",
   };
 }
 
-function quantityOf(userId: number, asset: string): number {
-  const row = db()
-    .prepare("SELECT quantity FROM positions WHERE user_id = ? AND asset = ?")
-    .get(userId, asset) as { quantity: number } | undefined;
-  return row?.quantity ?? 0;
+async function quantityOf(userId: number, asset: string): Promise<number> {
+  const row = await queryOne<{ quantity: number }>(
+    "SELECT quantity FROM positions WHERE user_id = $1 AND asset = $2",
+    [userId, asset],
+  );
+  return row ? Number(row.quantity) : 0;
 }
 
 /** Achat simulé pour un montant en euros. */
@@ -84,28 +93,35 @@ export async function buy(
   if (!ASSET_IDS.includes(asset)) throw new Error("Actif inconnu.");
   if (!Number.isFinite(amount) || amount <= 0) throw new Error("Montant invalide.");
 
-  ensure(userId);
-  const { cash } = db()
-    .prepare("SELECT cash FROM portfolios WHERE user_id = ?")
-    .get(userId) as { cash: number };
-
-  if (amount > cash + 1e-9) throw new Error("Liquidités insuffisantes.");
+  await ensure(userId);
+  const row = await queryOne<{ cash: number }>(
+    "SELECT cash FROM portfolios WHERE user_id = $1",
+    [userId],
+  );
+  if (!row || amount > Number(row.cash) + 1e-9) throw new Error("Liquidités insuffisantes.");
 
   const { price } = await getLastPrice(asset);
   const fee = amount * FEE_RATE;
   const quantity = (amount - fee) / price;
 
-  db().transaction(() => {
-    db().prepare("UPDATE portfolios SET cash = cash - ? WHERE user_id = ?").run(amount, userId);
-    db().prepare(
-      `INSERT INTO positions (user_id, asset, quantity) VALUES (?, ?, ?)
-       ON CONFLICT(user_id, asset) DO UPDATE SET quantity = quantity + excluded.quantity`,
-    ).run(userId, asset, quantity);
-    db().prepare(
-      `INSERT INTO orders (user_id, asset, side, quantity, price, fee, source)
-       VALUES (?, ?, 'buy', ?, ?, ?, ?)`,
-    ).run(userId, asset, quantity, price, fee, source);
-  })();
+  // Débit, position et trace dans une seule transaction : soit tout passe,
+  // soit rien, pour ne jamais laisser un portefeuille incohérent.
+  await transaction([
+    {
+      text: "UPDATE portfolios SET cash = cash - $1 WHERE user_id = $2",
+      params: [amount, userId],
+    },
+    {
+      text: `INSERT INTO positions (user_id, asset, quantity) VALUES ($1, $2, $3)
+             ON CONFLICT (user_id, asset) DO UPDATE SET quantity = positions.quantity + EXCLUDED.quantity`,
+      params: [userId, asset, quantity],
+    },
+    {
+      text: `INSERT INTO orders (user_id, asset, side, quantity, price, fee, source)
+             VALUES ($1, $2, 'buy', $3, $4, $5, $6)`,
+      params: [userId, asset, quantity, price, fee, source],
+    },
+  ]);
 }
 
 /** Vente simulée d'une quantité d'actif. */
@@ -118,37 +134,55 @@ export async function sell(
   if (!ASSET_IDS.includes(asset)) throw new Error("Actif inconnu.");
   if (!Number.isFinite(quantity) || quantity <= 0) throw new Error("Quantité invalide.");
 
-  const detenu = quantityOf(userId, asset);
+  const detenu = await quantityOf(userId, asset);
   if (quantity > detenu + 1e-12) throw new Error("Quantité supérieure à ce que tu détiens.");
 
   const { price } = await getLastPrice(asset);
   const brut = quantity * price;
   const fee = brut * FEE_RATE;
 
-  db().transaction(() => {
-    db().prepare("UPDATE portfolios SET cash = cash + ? WHERE user_id = ?")
-      .run(brut - fee, userId);
-    db().prepare("UPDATE positions SET quantity = quantity - ? WHERE user_id = ? AND asset = ?")
-      .run(quantity, userId, asset);
-    db().prepare(
-      `INSERT INTO orders (user_id, asset, side, quantity, price, fee, source)
-       VALUES (?, ?, 'sell', ?, ?, ?, ?)`,
-    ).run(userId, asset, quantity, price, fee, source);
-  })();
+  await transaction([
+    {
+      text: "UPDATE portfolios SET cash = cash + $1 WHERE user_id = $2",
+      params: [brut - fee, userId],
+    },
+    {
+      text: "UPDATE positions SET quantity = quantity - $1 WHERE user_id = $2 AND asset = $3",
+      params: [quantity, userId, asset],
+    },
+    {
+      text: `INSERT INTO orders (user_id, asset, side, quantity, price, fee, source)
+             VALUES ($1, $2, 'sell', $3, $4, $5, $6)`,
+      params: [userId, asset, quantity, price, fee, source],
+    },
+  ]);
 }
 
-export function getOrders(userId: number, limit = 50): Order[] {
-  return db()
-    .prepare("SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT ?")
-    .all(userId, limit) as Order[];
+export async function getOrders(userId: number, limit = 50): Promise<Order[]> {
+  const rows = await query<Order & { created_at: string | Date }>(
+    `SELECT id, asset, side, quantity, price, fee, source,
+            to_char(created_at, 'YYYY-MM-DD HH24:MI') AS created_at
+     FROM orders WHERE user_id = $1 ORDER BY id DESC LIMIT $2`,
+    [userId, limit],
+  );
+  return rows.map((o) => ({
+    ...o,
+    quantity: Number(o.quantity),
+    price: Number(o.price),
+    fee: Number(o.fee),
+    created_at: String(o.created_at),
+  }));
 }
 
 /** Remet le portefeuille à son état initial. */
-export function resetPortfolio(userId: number) {
-  db().transaction(() => {
-    db().prepare("UPDATE portfolios SET cash = start_capital WHERE user_id = ?").run(userId);
-    db().prepare("DELETE FROM positions WHERE user_id = ?").run(userId);
-    db().prepare("DELETE FROM orders WHERE user_id = ?").run(userId);
-    db().prepare("UPDATE bots SET enabled = 0, stopped_reason = NULL WHERE user_id = ?").run(userId);
-  })();
+export async function resetPortfolio(userId: number): Promise<void> {
+  await transaction([
+    { text: "UPDATE portfolios SET cash = start_capital WHERE user_id = $1", params: [userId] },
+    { text: "DELETE FROM positions WHERE user_id = $1", params: [userId] },
+    { text: "DELETE FROM orders WHERE user_id = $1", params: [userId] },
+    {
+      text: "UPDATE bots SET enabled = 0, stopped_reason = NULL WHERE user_id = $1",
+      params: [userId],
+    },
+  ]);
 }

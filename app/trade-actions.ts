@@ -38,7 +38,7 @@ export async function actionVente(_p: ActionState, fd: FormData): Promise<Action
 export async function actionReset(): Promise<void> {
   const user = await currentUser();
   if (!user) return;
-  resetPortfolio(user.id);
+  await resetPortfolio(user.id);
   revalidatePath("/tableau-de-bord");
 }
 
@@ -46,7 +46,7 @@ export async function actionBot(_p: ActionState, fd: FormData): Promise<ActionSt
   const user = await currentUser();
   if (!user) return { error: "Connecte-toi d'abord." };
 
-  saveBot(user.id, {
+  await saveBot(user.id, {
     asset: String(fd.get("asset")) as AssetId,
     strategy: String(fd.get("strategy")) as StrategyId,
     fast: Number(fd.get("fast")),

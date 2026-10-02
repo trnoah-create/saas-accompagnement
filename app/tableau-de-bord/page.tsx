@@ -18,7 +18,7 @@ export default async function Page() {
   if (!user) redirect("/connexion");
 
   const portefeuille = await getPortfolio(user.id);
-  const ordres = getOrders(user.id, 20);
+  const ordres = await getOrders(user.id, 20);
 
   // Prix courants + courbes pour chaque actif.
   const series = await Promise.all(

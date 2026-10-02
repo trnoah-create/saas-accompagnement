@@ -1,5 +1,5 @@
 import "server-only";
-import { db } from "../db";
+import { query } from "../db";
 import { getAsset, type AssetId } from "./assets";
 import { downloadBars } from "./providers";
 import { demoBars } from "./demo";
@@ -14,34 +14,79 @@ const CACHE_TTL_MS = 3600_000;
 
 const lastFetch = new Map<string, number>();
 
-function readCache(asset: string, days: number): Bar[] {
-  return db()
-    .prepare(
-      `SELECT day, open, high, low, close FROM price_bars
-       WHERE asset = ? ORDER BY day DESC LIMIT ?`,
-    )
-    .all(asset, days) as Bar[];
+async function readCache(asset: string, days: number): Promise<Bar[]> {
+  try {
+    return await readCacheOrThrow(asset, days);
+  } catch {
+    return []; // base indisponible : on se passe du cache.
+  }
 }
 
-function cacheSource(asset: string): string | null {
-  const row = db()
-    .prepare("SELECT source FROM price_bars WHERE asset = ? LIMIT 1")
-    .get(asset) as { source: string } | undefined;
-  return row?.source ?? null;
-}
-
-function writeCache(asset: string, bars: Bar[], source: string) {
-  const stmt = db().prepare(
-    `INSERT INTO price_bars (asset, day, open, high, low, close, source)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(asset, day) DO UPDATE SET
-       open=excluded.open, high=excluded.high, low=excluded.low,
-       close=excluded.close, source=excluded.source`,
+async function readCacheOrThrow(asset: string, days: number): Promise<Bar[]> {
+  const rows = await query<Bar>(
+    `SELECT to_char(day, 'YYYY-MM-DD') AS day, open, high, low, close
+     FROM price_bars WHERE asset = $1 ORDER BY day DESC LIMIT $2`,
+    [asset, days],
   );
-  const tx = db().transaction((rows: Bar[]) => {
-    for (const b of rows) stmt.run(asset, b.day, b.open, b.high, b.low, b.close, source);
+  return rows.map((b) => ({
+    day: String(b.day),
+    open: Number(b.open),
+    high: Number(b.high),
+    low: Number(b.low),
+    close: Number(b.close),
+  }));
+}
+
+async function cacheSource(asset: string): Promise<string | null> {
+  try {
+    const rows = await query<{ source: string }>(
+      "SELECT source FROM price_bars WHERE asset = $1 LIMIT 1",
+      [asset],
+    );
+    return rows[0]?.source ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeCache(asset: string, bars: Bar[], source: string) {
+  try {
+    await writeCacheOrThrow(asset, bars, source);
+  } catch (e) {
+    console.warn("[marché] cache indisponible :", (e as Error).message);
+  }
+}
+
+async function writeCacheOrThrow(asset: string, bars: Bar[], source: string) {
+  // Insertion groupée : une seule requête plutôt qu'une par journée.
+  const valeurs: string[] = [];
+  const params: unknown[] = [];
+  bars.forEach((b, i) => {
+    const n = i * 7;
+    valeurs.push(`($${n + 1}, $${n + 2}, $${n + 3}, $${n + 4}, $${n + 5}, $${n + 6}, $${n + 7})`);
+    params.push(asset, b.day, b.open, b.high, b.low, b.close, source);
   });
-  tx(bars);
+
+  // On découpe pour ne pas dépasser la limite de paramètres de Postgres.
+  const LOT = 500;
+  for (let i = 0; i < valeurs.length; i += LOT) {
+    const tranche = valeurs.slice(i, i + LOT);
+    const decalage = i * 7;
+    const texte = tranche
+      .map((_, j) => {
+        const n = j * 7;
+        return `($${n + 1}, $${n + 2}, $${n + 3}, $${n + 4}, $${n + 5}, $${n + 6}, $${n + 7})`;
+      })
+      .join(", ");
+    await query(
+      `INSERT INTO price_bars (asset, day, open, high, low, close, source)
+       VALUES ${texte}
+       ON CONFLICT (asset, day) DO UPDATE SET
+         open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
+         close = EXCLUDED.close, source = EXCLUDED.source`,
+      params.slice(decalage, decalage + tranche.length * 7),
+    );
+  }
 }
 
 /**
@@ -58,16 +103,16 @@ export async function getPrices(
   if (!asset) throw new Error(`Actif inconnu : ${assetId}`);
 
   const recent = lastFetch.get(assetId) ?? 0;
-  const cached = readCache(assetId, days);
+  const cached = await readCache(assetId, days);
   const frais = Date.now() - recent < CACHE_TTL_MS;
 
   if (cached.length > 0 && frais) {
-    return { asset: assetId, bars: cached.reverse(), source: cacheSource(assetId) ?? "cache" };
+    return { asset: assetId, bars: cached.reverse(), source: (await cacheSource(assetId)) ?? "cache" };
   }
 
   try {
     const bars = await downloadBars(asset, days);
-    writeCache(assetId, bars, asset.provider);
+    await writeCache(assetId, bars, asset.provider);
     lastFetch.set(assetId, Date.now());
     return { asset: assetId, bars, source: asset.provider };
   } catch (error) {
@@ -75,11 +120,11 @@ export async function getPrices(
 
     // On préfère un cache réel, même périmé, aux données inventées.
     if (cached.length > 0) {
-      return { asset: assetId, bars: cached.reverse(), source: cacheSource(assetId) ?? "cache" };
+      return { asset: assetId, bars: cached.reverse(), source: (await cacheSource(assetId)) ?? "cache" };
     }
 
     const bars = demoBars(assetId, days);
-    writeCache(assetId, bars, "demo");
+    await writeCache(assetId, bars, "demo");
     lastFetch.set(assetId, Date.now());
     return { asset: assetId, bars, source: "demo" };
   }

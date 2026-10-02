@@ -16,7 +16,7 @@ export default async function Page() {
   const user = await currentUser();
   if (!user) redirect("/connexion");
 
-  const config = getBot(user.id);
+  const config = await getBot(user.id);
   const portefeuille = await getPortfolio(user.id);
   const seuil = portefeuille.startCapital * (1 - config.max_loss_pct / 100);
 

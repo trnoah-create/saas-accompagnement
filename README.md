@@ -15,8 +15,16 @@ npm run dev      # http://localhost:3000
 npm test         # tests du moteur de backtest
 ```
 
-Aucune clé API n'est nécessaire. La base de données se crée toute seule au premier
-lancement (`data/simutrade.db`).
+Aucune clé API n'est nécessaire pour les prix. En revanche l'application a besoin
+d'une base PostgreSQL : renseigne `DATABASE_URL`. Pour essayer en local sans rien
+installer, un vrai Postgres en mémoire est fourni :
+
+```bash
+node tests/pg-local.mjs &
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5433/postgres npm run dev
+```
+
+Les tables sont créées automatiquement au premier lancement.
 
 ## Comment ça marche
 
@@ -71,31 +79,106 @@ app/
   backtest/           Test d'une stratégie
   comparateur/        Tous les actifs × toutes les stratégies
   bot/                Réglages et exécution du bot
+  diagnostic/         Vérification base + prix, à ouvrir après déploiement
 lib/
-  db.ts               Base SQLite (schéma + migrations)
+  db.ts               Base PostgreSQL (schéma, requêtes, transactions)
+  health.ts           Contrôles affichés sur /diagnostic
   auth.ts             Comptes, mots de passe, sessions
   portfolio.ts        Achat, vente, frais, historique
   bot.ts              Bot et stop de perte
   constants.ts        Capital de départ, frais, avertissement
   market/             Actifs, téléchargement des prix, cache, démo
   engine/             Stratégies et moteur de backtest
-tests/engine.test.ts  Tests du moteur
+tests/engine.test.ts  Tests du moteur (anti-triche, frais, calculs)
+tests/db.test.ts      Tests SQL contre un vrai PostgreSQL en mémoire
+tests/pg-local.mjs    Serveur PostgreSQL local pour le développement
 ```
 
 ## Technique
 
-Next.js (App Router) · TypeScript · Tailwind CSS v4 · SQLite (better-sqlite3).
+Next.js (App Router) · TypeScript · Tailwind CSS v4 · PostgreSQL.
+
+La base est accessible via le pilote HTTP de Neon en production (adapté au
+serverless, sans connexion TCP à maintenir) et via le pilote `pg` classique pour
+tout autre PostgreSQL — Supabase, Railway ou une base locale.
 
 Les mots de passe sont stockés sous forme d'empreinte scrypt avec sel aléatoire, jamais
 en clair. La session est un jeton aléatoire dans un cookie `httpOnly`, inaccessible au
 JavaScript du navigateur.
 
-### Déploiement
+## 📱 Mettre le site en ligne depuis un téléphone
 
-Le code fonctionne tel quel sur un serveur Node classique. **Sur Vercel, attention** :
-le système de fichiers est éphémère, donc la base SQLite serait remise à zéro à chaque
-déploiement. Pour un usage en ligne durable, il faut remplacer SQLite par une base
-hébergée (Postgres, Turso…) — seul `lib/db.ts` est à adapter.
+Tout se fait depuis le navigateur du téléphone. Aucun ordinateur, aucune
+ligne de commande. Compte environ 15 minutes.
+
+### Étape 1 — Choisir la bonne branche
+
+Le simulateur vit sur la branche **`simulateur-trading`**. L'ancien site
+d'accompagnement est resté sur `main`. Deux possibilités :
+
+- **Simple** : dans GitHub → ton dépôt → onglet **Pull requests** → *New pull
+  request* → base `main`, compare `simulateur-trading` → *Create* puis *Merge*.
+  Le simulateur devient le contenu de `main`.
+- **Ou** : garder les deux et indiquer à Vercel, à l'étape 3, que la branche de
+  production est `simulateur-trading`.
+
+### Étape 2 — Créer le projet Vercel
+
+1. Va sur **vercel.com** → *Sign Up* → **Continue with GitHub**.
+2. Autorise Vercel à accéder à tes dépôts.
+3. *Add New…* → **Project** → choisis `saas-accompagnement` → **Import**.
+4. Ne touche à aucun réglage (Next.js est détecté tout seul) → **Deploy**.
+
+Le premier déploiement va réussir, mais le site ne pourra pas encore créer de
+comptes : il manque la base de données. C'est normal, on s'en occupe tout de
+suite.
+
+### Étape 3 — Vérifier la branche déployée
+
+Dans le projet Vercel → **Settings** → **Git** → *Production Branch*.
+Mets-y `main` si tu as fusionné à l'étape 1, sinon `simulateur-trading`.
+Si tu as dû la changer, va dans **Deployments** → bouton `⋯` du dernier
+déploiement → **Redeploy**.
+
+### Étape 4 — Brancher la base de données gratuite
+
+1. Dans ton projet Vercel → onglet **Storage**.
+2. **Create Database** → choisis **Neon** (PostgreSQL) → *Continue*.
+3. Laisse le plan **Free**, choisis une région proche (ex. *Frankfurt*) → crée.
+4. Vercel propose de connecter la base au projet : **accepte**.
+
+Vercel ajoute alors tout seul la variable `DATABASE_URL`. Tu n'as aucune
+adresse à recopier — ce qui évite les fautes de frappe sur un téléphone.
+
+### Étape 5 — Redéployer
+
+**Deployments** → bouton `⋯` sur le déploiement le plus récent → **Redeploy**.
+C'est nécessaire pour que le site voie la nouvelle variable.
+
+### Étape 6 — Vérifier que tout marche
+
+Ouvre **`https://ton-site.vercel.app/diagnostic`** sur ton téléphone.
+
+Cette page te dit en clair, sans jargon :
+
+- ✅ **Base de données : connectée** → les comptes seront bien enregistrés ;
+- ✅ **Prix de marché : les 4 actifs reçoivent de vrais prix** → Binance et
+  Stooq répondent correctement.
+
+Si les deux lignes sont vertes, c'est terminé : crée ton compte et tu reçois
+tes 1 000 € fictifs.
+
+### Si quelque chose cloche
+
+| Ce que tu vois | Ce qu'il faut faire |
+|---|---|
+| « Base de données : pas encore connectée » | L'étape 4 n'a pas abouti, ou tu n'as pas redéployé (étape 5). |
+| « Base configurée mais injoignable » | La base Neon est peut-être en veille : recharge la page une fois. |
+| « Démonstration » sur les prix | Les prix affichés sont **inventés**. Recharge dans une minute ; si ça persiste, Binance ou Stooq sont momentanément indisponibles. |
+| Page blanche ou erreur 500 | Vercel → **Deployments** → clique le déploiement → **Runtime Logs** pour voir le message. |
+
+> La page `/diagnostic` n'expose aucune donnée personnelle ni mot de passe, et
+> n'est pas indexée par les moteurs de recherche.
 
 ## Renommer le projet
 

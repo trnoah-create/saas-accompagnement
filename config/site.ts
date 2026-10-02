@@ -34,6 +34,7 @@ export const siteConfig = {
   legal: [
     { label: "Mentions légales", href: "/mentions-legales" },
     { label: "CGU", href: "/cgu" },
+    { label: "Diagnostic", href: "/diagnostic" },
   ],
 } as const;
 

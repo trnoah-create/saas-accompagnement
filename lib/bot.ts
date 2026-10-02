@@ -1,5 +1,5 @@
 import "server-only";
-import { db } from "./db";
+import { query, queryOne } from "./db";
 import { getPrices, type AssetId } from "./market";
 import { decide, type StrategyId } from "./engine/strategies";
 import { buy, sell, getPortfolio } from "./portfolio";
@@ -25,15 +25,24 @@ const DEFAUT: BotConfig = {
   stopped_reason: null,
 };
 
-export function getBot(userId: number): BotConfig {
-  const row = db().prepare("SELECT * FROM bots WHERE user_id = ?").get(userId) as
-    | (BotConfig & { user_id: number })
-    | undefined;
-  return row ?? DEFAUT;
+export async function getBot(userId: number): Promise<BotConfig> {
+  const row = await queryOne<BotConfig>(
+    `SELECT asset, strategy, fast, slow, max_loss_pct, enabled, stopped_reason
+     FROM bots WHERE user_id = $1`,
+    [userId],
+  );
+  if (!row) return DEFAUT;
+  return {
+    ...row,
+    fast: Number(row.fast),
+    slow: Number(row.slow),
+    max_loss_pct: Number(row.max_loss_pct),
+    enabled: Number(row.enabled),
+  };
 }
 
-export function saveBot(userId: number, config: Partial<BotConfig>) {
-  const actuel = getBot(userId);
+export async function saveBot(userId: number, config: Partial<BotConfig>): Promise<void> {
+  const actuel = await getBot(userId);
   const c = { ...actuel, ...config };
 
   // Garde-fous : une moyenne courte doit rester plus courte que la longue.
@@ -42,14 +51,15 @@ export function saveBot(userId: number, config: Partial<BotConfig>) {
   if (c.fast >= c.slow) c.fast = Math.max(2, c.slow - 1);
   c.max_loss_pct = Math.max(1, Math.min(90, c.max_loss_pct));
 
-  db().prepare(
+  await query(
     `INSERT INTO bots (user_id, asset, strategy, fast, slow, max_loss_pct, enabled, stopped_reason)
-     VALUES (@user_id, @asset, @strategy, @fast, @slow, @max_loss_pct, @enabled, @stopped_reason)
-     ON CONFLICT(user_id) DO UPDATE SET
-       asset=excluded.asset, strategy=excluded.strategy, fast=excluded.fast,
-       slow=excluded.slow, max_loss_pct=excluded.max_loss_pct,
-       enabled=excluded.enabled, stopped_reason=excluded.stopped_reason`,
-  ).run({ ...c, user_id: userId });
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     ON CONFLICT (user_id) DO UPDATE SET
+       asset = EXCLUDED.asset, strategy = EXCLUDED.strategy, fast = EXCLUDED.fast,
+       slow = EXCLUDED.slow, max_loss_pct = EXCLUDED.max_loss_pct,
+       enabled = EXCLUDED.enabled, stopped_reason = EXCLUDED.stopped_reason`,
+    [userId, c.asset, c.strategy, c.fast, c.slow, c.max_loss_pct, c.enabled, c.stopped_reason],
+  );
 }
 
 export type BotRun = {
@@ -64,7 +74,7 @@ export type BotRun = {
  * journées déjà closes, jamais la bougie du jour en cours.
  */
 export async function runBot(userId: number): Promise<BotRun> {
-  const bot = getBot(userId);
+  const bot = await getBot(userId);
   if (!bot.enabled) return { action: "aucune", message: "Le bot est à l'arrêt." };
 
   const portefeuille = await getPortfolio(userId);
@@ -76,7 +86,7 @@ export async function runBot(userId: number): Promise<BotRun> {
       await sell(userId, p.asset as AssetId, p.quantity, "bot");
     }
     const raison = `Stop de perte atteint : la valeur est passée sous ${euro(seuil)} (-${bot.max_loss_pct} %). Positions liquidées, bot arrêté.`;
-    saveBot(userId, { enabled: 0, stopped_reason: raison });
+    await saveBot(userId, { enabled: 0, stopped_reason: raison });
     return { action: "arrêt", message: raison };
   }
 
