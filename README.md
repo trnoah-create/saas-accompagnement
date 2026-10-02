@@ -1,142 +1,102 @@
-# MonProjet
+# SimuTrade
 
-Site vitrine (landing page + offres) du projet d'accompagnement et de formation
-destiné aux personnes qui veulent créer leur propre SaaS.
+Simulateur de trading à **argent 100 % fictif**. Portefeuille virtuel, backtests de
+stratégies et bot automatique sur Bitcoin, Ethereum, Dogecoin et le S&P 500.
 
-Next.js (App Router) · TypeScript · Tailwind CSS v4 · déployable sur Vercel.
+> ⚠️ **Simulation, pas un conseil financier. Les performances passées ne garantissent rien.**
+> Aucun courtier n'est contacté, aucun ordre réel n'est passé, aucune donnée bancaire
+> n'est demandée.
 
 ## Démarrer
 
 ```bash
 npm install
 npm run dev      # http://localhost:3000
+npm test         # tests du moteur de backtest
 ```
 
-Autres commandes : `npm run build` (build de production), `npm start` (sert le build).
+Aucune clé API n'est nécessaire. La base de données se crée toute seule au premier
+lancement (`data/simutrade.db`).
 
-## ⚙️ Renommer le projet
+## Comment ça marche
 
-Le nom « MonProjet » est provisoire et **centralisé en un seul endroit**.
-Pour le changer, modifie une seule ligne dans [`config/site.ts`](config/site.ts) :
+### Données de marché
+Deux sources gratuites et sans inscription :
+- **Binance** (`/api/v3/klines`) pour BTC, ETH et DOGE ;
+- **Stooq** (export CSV) pour le SPY.
 
-```ts
-export const siteConfig = {
-  name: "MonProjet", // ← seule ligne à modifier
-  ...
-};
-```
+Les prix sont mis en cache en base pendant une heure. **Si le réseau est bloqué**
+(hors-ligne, pare-feu d'entreprise), l'application bascule sur des prix *inventés* pour
+rester utilisable — et affiche alors un bandeau rouge « Données de démonstration ».
+Ces prix n'ont aucune valeur historique.
 
-Le nouveau nom se propage automatiquement partout : header, footer, titres de
-pages, métadonnées SEO, favicon (généré depuis l'initiale), textes des offres.
+### Portefeuille fictif
+Chaque compte démarre avec **1 000 € virtuels**. Achat et vente au dernier prix connu,
+avec des **frais de 0,1 % par ordre**. Tout l'historique est conservé.
 
-Le même fichier contient aussi le slogan, la description SEO, l'URL de
-production, l'e-mail de contact, la navigation et les liens légaux.
+### Backtest
+Rejoue une stratégie sur les prix passés et renvoie : valeur finale, gain en %,
+pire chute (*max drawdown*), nombre d'ordres, frais et courbe d'évolution.
+
+Stratégies disponibles :
+- **Acheter et garder** — la référence à battre.
+- **Croisement de moyennes mobiles** — 20 et 50 jours par défaut, paramétrables.
+
+### ⚠️ Pas de triche avec le futur
+C'est le piège classique du backtest : utiliser sans s'en rendre compte un prix
+qu'on ne pouvait pas connaître, ce qui gonfle artificiellement les résultats.
+
+La règle appliquée ici, dans `lib/engine/backtest.ts` :
+
+1. la décision du jour *i* ne lit que les journées `0 … i-1` ;
+2. l'ordre est exécuté à **l'ouverture** du jour *i* ;
+3. le portefeuille n'est valorisé à la clôture qu'*après* l'exécution.
+
+Trois tests le vérifient (`npm test`), dont celui-ci : deux séries identiques jusqu'à
+un jour donné puis radicalement différentes doivent produire **exactement les mêmes
+ordres** avant le point de divergence.
+
+### Bot
+Applique la stratégie choisie au portefeuille fictif, avec un **stop de perte maximale**
+réglable : si la valeur passe sous le seuil, tout est vendu et le bot s'arrête en
+expliquant pourquoi. Même règle anti-triche que le backtest.
 
 ## Structure
 
 ```
 app/
-  layout.tsx              Layout global (header, footer, thème, SEO)
-  page.tsx                Landing : hero, « Pourquoi moi », témoignages, CTA
-  offres/                 Les deux offres, le programme et la FAQ
-  a-propos/               Parcours du fondateur
-  connexion/              Espace membre (à venir)
-  discussion/             Formulaire de contact + accès Discord réservé
-  mentions-legales/       ⚠️ vide — à rédiger
-  cgu/                    ⚠️ vide — à rédiger
-  icon.tsx                Favicon généré depuis siteConfig.name
-components/               Header, footer, thème, témoignages, UI partagée
+  page.tsx            Accueil
+  connexion/ inscription/
+  tableau-de-bord/    Portefeuille, ordres, graphiques
+  backtest/           Test d'une stratégie
+  comparateur/        Tous les actifs × toutes les stratégies
+  bot/                Réglages et exécution du bot
 lib/
-  entitlements.ts         ⚠️ Contrôle d'accès à l'offre Accompagnement
-config/
-  site.ts                 ⭐ Nom du projet et configuration générale
-  offers.ts               Tarifs, bénéfices et modules de la formation
+  db.ts               Base SQLite (schéma + migrations)
+  auth.ts             Comptes, mots de passe, sessions
+  portfolio.ts        Achat, vente, frais, historique
+  bot.ts              Bot et stop de perte
+  constants.ts        Capital de départ, frais, avertissement
+  market/             Actifs, téléchargement des prix, cache, démo
+  engine/             Stratégies et moteur de backtest
+tests/engine.test.ts  Tests du moteur
 ```
 
-## Modifier les offres
+## Technique
 
-Tarifs, arguments et modules de la formation vivent dans
-[`config/offers.ts`](config/offers.ts) — aucune modification de composant
-nécessaire pour ajuster un prix ou ajouter un module.
+Next.js (App Router) · TypeScript · Tailwind CSS v4 · SQLite (better-sqlite3).
 
-## Ajouter des témoignages
+Les mots de passe sont stockés sous forme d'empreinte scrypt avec sel aléatoire, jamais
+en clair. La session est un jeton aléatoire dans un cookie `httpOnly`, inaccessible au
+JavaScript du navigateur.
 
-La section témoignages est un placeholder. Dans
-[`components/testimonials.tsx`](components/testimonials.tsx), remplis le tableau
-`testimonials` : la section bascule automatiquement du placeholder vers la
-grille dès qu'il contient au moins une entrée.
+### Déploiement
 
-## Pages légales
+Le code fonctionne tel quel sur un serveur Node classique. **Sur Vercel, attention** :
+le système de fichiers est éphémère, donc la base SQLite serait remise à zéro à chaque
+déploiement. Pour un usage en ligne durable, il faut remplacer SQLite par une base
+hébergée (Postgres, Turso…) — seul `lib/db.ts` est à adapter.
 
-`/mentions-legales` et `/cgu` sont volontairement vides, en attente de la
-création de la micro-entreprise. Chaque fichier liste en commentaire les
-éléments à renseigner ; il suffit ensuite de remplacer `<LegalPlaceholder />`
-par le contenu rédigé.
+## Renommer le projet
 
-## Mode clair / sombre
-
-Toggle dans le header, préférence enregistrée dans `localStorage`. Par défaut le
-site suit la préférence système, jusqu'à un premier choix manuel. Un script
-inline (`components/theme-provider.tsx`) applique le thème avant le rendu pour
-éviter tout flash au chargement.
-
-## Page /discussion — contact et accès réservé
-
-La page contient deux blocs indépendants.
-
-**1. Formulaire de contact — visible par tous.** Nom, e-mail, message, traité
-par une Server Action (`app/discussion/actions.ts`) qui envoie un e-mail via
-Resend. Validation côté serveur, pot de miel anti-robots, et l'adresse du
-visiteur placée en `reply_to` (jamais en expéditeur, pour ne pas casser
-SPF/DMARC). Sans `RESEND_API_KEY`, le formulaire s'affiche et invite à écrire
-directement à l'adresse de contact.
-
-**2. Accès Discord — membres Accompagnement uniquement.** Voir ci-dessous.
-
-### ⚠️ Comment l'accès Discord est protégé
-
-`lib/entitlements.ts` est le **seul** point de décision. Trois garde-fous :
-
-1. **Décision côté serveur.** La page est un Server Component et le module est
-   marqué `server-only` : le build échoue s'il est importé depuis un composant
-   client. Le navigateur ne participe jamais à la décision.
-2. **Le lien ne quitte le serveur que si l'accès est accordé.**
-   `process.env.DISCORD_INVITE_URL` n'est lu qu'à l'intérieur de la branche
-   autorisée. Pour un visiteur non autorisé, l'URL n'apparaît nulle part dans
-   la réponse — ni HTML, ni bundle JS, ni payload React. Ne jamais renommer
-   cette variable en `NEXT_PUBLIC_*` : elle deviendrait publique.
-3. **Refus par défaut.** Il faut être authentifié **et** avoir l'Accompagnement.
-   Tout autre cas est refusé, y compris les acheteurs de la seule Formation.
-
-**État actuel : personne n'a accès.** Il n'existe ni authentification, ni base
-de données, ni Stripe — `getViewer()` ne peut identifier personne et renvoie un
-visiteur anonyme. C'est volontaire : mieux vaut refuser tout le monde
-qu'ouvrir à tort. Les emplacements à brancher (session, puis lecture des achats
-en base alimentée par le webhook Stripe) sont documentés dans le fichier.
-
-### Prévisualiser la vue membre
-
-```bash
-DEV_PREVIEW_ENTITLEMENT=accompagnement npm run dev
-```
-
-Simule un compte ayant acheté l'offre. **Sans aucun effet en production**
-(neutralisé dès que `NODE_ENV=production`, ce qui est le cas sur Vercel).
-
-## Variables d'environnement
-
-Voir [`.env.example`](.env.example). Aucune n'est requise pour lancer le site ;
-elles activent l'envoi d'e-mail et l'accès Discord.
-
-## Paiements
-
-Aucune intégration Stripe pour l'instant : les boutons des offres renvoient vers
-`/connexion`, qui invite à passer par e-mail. Le branchement du paiement se fera
-plus tard.
-
-## Déploiement sur Vercel
-
-Importer le dépôt sur [vercel.com/new](https://vercel.com/new) : le framework est
-détecté automatiquement, aucune variable d'environnement n'est requise. Pense à
-mettre à jour `url` dans `config/site.ts` avec le domaine final (utilisé pour les
-métadonnées de partage).
+Une seule ligne dans [`config/site.ts`](config/site.ts) : `name`.
