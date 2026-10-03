@@ -100,9 +100,45 @@ export const botReglesConfig = {
     semaine: 6,
     /** Idem sur le mois calendaire. */
     mois: 15,
+    /**
+     * PLANCHER TOTAL, en % du capital de référence.
+     *
+     * Si la valeur du portefeuille tombe à ce niveau ou en dessous, le bot
+     * s'arrête DÉFINITIVEMENT : il ne reprendra que sur réactivation
+     * manuelle. 85 % correspond à une perte totale de 15 %.
+     */
+    plancherTotalPct: 85,
   },
 
-  /** Coûts simulés. */
+  /**
+   * Réinvestissement mensuel des gains — DÉSACTIVÉ PAR DÉFAUT.
+   *
+   * Activé (`actif: true`), le capital de référence du mois suivant est
+   * augmenté des gains du mois écoulé. Les pertes, elles, ne le baissent
+   * jamais : le capital de référence ne peut que monter ou rester stable.
+   *
+   * Ce capital de référence sert de base au plancher total ci-dessus :
+   * réinvestir verrouille donc les gains acquis.
+   */
+  reinvestissement: {
+    actif: false,
+  },
+
+  /** Surveillance et alertes. */
+  alertes: {
+    /**
+     * Délai au-delà duquel la tâche quotidienne est considérée en panne.
+     * 26 heures laissent une marge sur une exécution quotidienne.
+     */
+    retardMaxHeures: 26,
+  },
+
+  /**
+   * Coûts simulés — pour que le résultat ne soit pas trop optimiste.
+   *
+   * Ils sont prélevés sur CHAQUE ordre, à l'achat comme à la vente, et
+   * figurent dans chaque ligne du compte rendu.
+   */
   couts: {
     /** Frais prélevés sur chaque ordre, en % du montant. */
     fraisPct: 0.1,

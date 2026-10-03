@@ -16,7 +16,15 @@ import {
   type ReglesBot,
 } from "../lib/bot-regles/decider";
 import { evaluerLimites, jourDeLExperience, jourLocal } from "../lib/limites";
-import { botReglesConfig as cfg, poidsMaxPct, idsActifs } from "../config/bot-regles";
+import {
+  botReglesConfig as cfg,
+  poidsMaxPct,
+  idsActifs,
+  fraisBot,
+  prixAchatBot,
+  prixVenteBot,
+} from "../config/bot-regles";
+import { calculerCapitalSuivant, moisDe } from "../lib/bot-regles/reinvestissement";
 import { ASSETS, ASSET_IDS, getAsset } from "../lib/market/assets";
 import { sourcesPour } from "../lib/market/sources";
 import type { Bar } from "../lib/market/types";
@@ -405,6 +413,168 @@ test("les journées sont découpées à l'heure de Paris", () => {
   assert.equal(jourLocal(new Date("2026-10-03T23:30:00Z"), "Europe/Paris"), "2026-10-04");
   assert.equal(jourDeLExperience("2026-10-01", "2026-10-01"), 1);
   assert.equal(jourDeLExperience("2026-10-01", "2026-10-10"), 10);
+});
+
+console.log("\nPlancher total — arrêt définitif");
+
+test("au-dessus du plancher, le bot continue", () => {
+  // Plancher à 85 % de 100 € = 85 €. À 86 €, on continue.
+  const d = evaluerLimites(86, { jour: 86, semaine: 86, mois: 86 }, SEUILS, 100);
+  assert.equal(d.action, "continuer");
+  assert.equal(d.pertes.total, 14);
+});
+
+test("le plancher atteint déclenche l'arrêt définitif", () => {
+  const d = evaluerLimites(85, { jour: 85, semaine: 85, mois: 85 }, SEUILS, 100);
+  assert.equal(d.action, "arret_total");
+  assert.match(d.motif, /Plancher total atteint/);
+  assert.match(d.motif, /réactivation manuelle/);
+});
+
+test("sous le plancher aussi, évidemment", () => {
+  const d = evaluerLimites(50, { jour: 50, semaine: 50, mois: 50 }, SEUILS, 100);
+  assert.equal(d.action, "arret_total");
+});
+
+test("le plancher total est prioritaire sur toutes les autres limites", () => {
+  // Une perte du jour de 15 € dépasse aussi la limite quotidienne et
+  // mensuelle : c'est l'arrêt définitif qui doit l'emporter.
+  const d = evaluerLimites(85, { jour: 100, semaine: 100, mois: 100 }, SEUILS, 100);
+  assert.equal(d.action, "arret_total");
+});
+
+test("sans capital de référence, le plancher n'est pas évalué", () => {
+  const d = evaluerLimites(10, { jour: 10, semaine: 10, mois: 10 }, SEUILS);
+  assert.notEqual(d.action, "arret_total");
+  assert.equal(d.pertes.total, null);
+});
+
+test("le plancher suit le capital de référence, pas le capital de départ", () => {
+  // Capital réinvesti à 200 € → plancher à 170 €, pas à 85 €.
+  // 165 € est donc sous le plancher dans un cas, largement au-dessus dans l'autre.
+  assert.equal(
+    evaluerLimites(165, { jour: 165, semaine: 165, mois: 165 }, SEUILS, 200).action,
+    "arret_total",
+    "avec un capital de référence de 200 €, le plancher est à 170 €",
+  );
+  assert.equal(
+    evaluerLimites(165, { jour: 165, semaine: 165, mois: 165 }, SEUILS, 100).action,
+    "continuer",
+    "avec un capital de référence de 100 €, le plancher est à 85 €",
+  );
+});
+
+console.log("\nRéinvestissement mensuel des gains");
+
+test("désactivé, le capital de référence ne bouge jamais", () => {
+  assert.deepEqual(calculerCapitalSuivant(100, 130, false), {
+    capital: 100,
+    gainReinvesti: 0,
+  });
+  assert.deepEqual(calculerCapitalSuivant(100, 70, false), {
+    capital: 100,
+    gainReinvesti: 0,
+  });
+});
+
+test("activé, un gain monte le capital de référence du mois suivant", () => {
+  assert.deepEqual(calculerCapitalSuivant(100, 112.5, true), {
+    capital: 112.5,
+    gainReinvesti: 12.5,
+  });
+});
+
+test("activé, une perte ne baisse JAMAIS le capital de référence", () => {
+  assert.deepEqual(calculerCapitalSuivant(100, 80, true), {
+    capital: 100,
+    gainReinvesti: 0,
+  });
+});
+
+test("un mois à l'équilibre ne change rien", () => {
+  assert.deepEqual(calculerCapitalSuivant(100, 100, true), {
+    capital: 100,
+    gainReinvesti: 0,
+  });
+});
+
+test("les gains s'empilent de mois en mois, jamais les pertes", () => {
+  // Mois 1 : +20 → 120. Mois 2 : -30 → reste 120. Mois 3 : +10 → 130.
+  let capital = 100;
+  capital = calculerCapitalSuivant(capital, 120, true).capital;
+  assert.equal(capital, 120);
+  capital = calculerCapitalSuivant(capital, 90, true).capital;
+  assert.equal(capital, 120, "une perte ne doit pas éroder le capital de référence");
+  capital = calculerCapitalSuivant(capital, 130, true).capital;
+  assert.equal(capital, 130);
+});
+
+test("réinvestir remonte le plancher, donc verrouille les gains", () => {
+  // Après un mois à +50 %, le capital de référence passe à 150 € et le
+  // plancher à 127,50 € : le bot s'arrête bien plus haut qu'au départ.
+  const { capital } = calculerCapitalSuivant(100, 150, true);
+  const plancher = capital * (cfg.pertes.plancherTotalPct / 100);
+  assert.equal(plancher, 127.5);
+  assert.equal(
+    evaluerLimites(127, { jour: 127, semaine: 127, mois: 127 }, SEUILS, capital).action,
+    "arret_total",
+  );
+});
+
+test("le mois d'un jour est bien extrait", () => {
+  assert.equal(moisDe("2026-10-03"), "2026-10");
+  assert.equal(moisDe("2026-01-31"), "2026-01");
+});
+
+test("le réinvestissement est désactivé par défaut", () => {
+  assert.equal(cfg.reinvestissement.actif, false, "l'option doit être désactivée au départ");
+});
+
+console.log("\nFrais simulés");
+
+test("des frais sont prélevés sur chaque ordre", () => {
+  assert.ok(cfg.couts.fraisPct > 0, "les frais ne doivent pas être nuls");
+  assert.equal(cfg.couts.fraisPct, 0.1);
+  assert.ok(cfg.couts.ecartPct > 0, "l'écart achat/vente ne doit pas être nul");
+});
+
+test("les frais et l'écart rendent un aller-retour perdant à prix constant", () => {
+  // On achète puis on revend immédiatement au même prix de marché : le
+  // portefeuille doit avoir perdu de l'argent, jamais en avoir gagné.
+  const prixMarche = 100;
+  const montant = 25;
+
+  const prixAchat = prixAchatBot(prixMarche);
+  const quantite = montant / prixAchat;
+  const coutTotal = montant + fraisBot(montant);
+
+  const prixVente = prixVenteBot(prixMarche);
+  const encaisse = quantite * prixVente;
+  const recu = encaisse - fraisBot(encaisse);
+
+  assert.ok(recu < coutTotal, `aller-retour gagnant (${recu} vs ${coutTotal}) : frais ignorés`);
+  // Ordre de grandeur : 0,1 % de frais à l'achat + 0,1 % à la vente
+  // + 0,1 % d'écart ≈ 0,3 % du montant.
+  const perte = coutTotal - recu;
+  assert.ok(
+    perte > montant * 0.002 && perte < montant * 0.005,
+    `perte de ${perte} € sur ${montant} €, attendue autour de 0,3 %`,
+  );
+});
+
+test("les frais figurent dans le plan d'ordres, pas seulement à l'exécution", () => {
+  // Avec 5 € de liquide, l'ordre doit être réduit pour que frais compris
+  // le coût tienne dans le liquide.
+  const e = etat(5, [{ asset: "SOL", quantity: 1, prixEntree: 95 }], 100);
+  const p = deciderOrdres(
+    e,
+    { BTC: auDessus(), SOL: auDessus(95) },
+    { BTC: 130, SOL: 95 },
+    regles(),
+  );
+  const achat = p.ordres.find((o) => o.asset === "BTC" && o.side === "buy");
+  assert.ok(achat);
+  assert.ok(achat.montant < 5, "le montant doit laisser de la place aux frais");
 });
 
 console.log("\nConfiguration demandée");

@@ -33,7 +33,25 @@ async function executer(request: Request) {
       refuses: c.detail.refuses.length,
     });
   } catch (e) {
+    const message = (e as Error).message;
     console.error("[bot] échec :", e);
+
+    // Une panne de la tâche est précisément ce qu'il faut savoir : on alerte.
+    // L'alerte ne doit jamais masquer l'erreur d'origine.
+    try {
+      const { envoyerAlerte } = await import("@/lib/alertes");
+      await envoyerAlerte({
+        type: "tache_echec",
+        cle: `tache_echec:${new Date().toISOString().slice(0, 16)}`,
+        titre: "La tâche quotidienne du bot a échoué",
+        message:
+          `L'exécution s'est interrompue sur une erreur : ${message}\n\n` +
+          `Aucun ordre n'a été passé. La page /diagnostic donne l'état complet.`,
+      });
+    } catch (e2) {
+      console.error("[bot] alerte impossible :", (e2 as Error).message);
+    }
+
     return NextResponse.json({ erreur: "Exécution impossible." }, { status: 500 });
   }
 }

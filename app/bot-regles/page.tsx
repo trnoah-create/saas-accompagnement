@@ -1,5 +1,13 @@
 import type { Metadata } from "next";
-import { historiqueBot, botEnPause, etatBot, jourDeLExperience } from "@/lib/bot-regles/run";
+import {
+  historiqueBot,
+  botEnPause,
+  etatBot,
+  etatExecutionBot,
+  motifPause,
+  jourDeLExperience,
+} from "@/lib/bot-regles/run";
+import { historiqueCapital } from "@/lib/bot-regles/capital";
 import { botReglesConfig as cfg, actifsActifs } from "@/config/bot-regles";
 import { BotPause } from "@/components/bot-pause";
 import { DisclaimerNote } from "@/components/disclaimer";
@@ -17,6 +25,7 @@ const LIBELLES: Record<string, { texte: string; classe: string }> = {
   en_pause: { texte: "En pause", classe: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300" },
   blocage_jour: { texte: "Blocage du jour", classe: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300" },
   pause_auto: { texte: "Pause automatique", classe: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300" },
+  arret_total: { texte: "Arrêt définitif", classe: "bg-red-200 text-red-900 dark:bg-red-900 dark:text-red-100" },
 };
 
 function Limite({ label, valeur, seuil }: { label: string; valeur: number | null; seuil: number }) {
@@ -34,7 +43,10 @@ function Limite({ label, valeur, seuil }: { label: string; valeur: number | null
 export default async function Page() {
   const comptes = await historiqueBot(90);
   const pause = await botEnPause();
+  const motif = await motifPause();
   const etat = await etatBot();
+  const execution = await etatExecutionBot();
+  const mois = await historiqueCapital(36);
 
   const aujourdhui = jourLocal(new Date(), cfg.fuseau);
   const numeroJour = jourDeLExperience(etat.depuisLe, aujourdhui);
@@ -74,6 +86,18 @@ export default async function Page() {
         <DisclaimerNote className="mt-3 text-amber-800 dark:text-amber-300" />
       </div>
 
+      {motif && (
+        <div
+          role="alert"
+          className="mt-6 rounded-2xl border border-red-300 bg-red-50 p-5 dark:border-red-800 dark:bg-red-950/50"
+        >
+          <h2 className="font-semibold text-red-900 dark:text-red-200">
+            Bot arrêté — réactivation manuelle nécessaire
+          </h2>
+          <p className="mt-2 text-sm leading-relaxed text-red-900 dark:text-red-200">{motif}</p>
+        </div>
+      )}
+
       <div className="mt-6 flex flex-wrap items-center gap-4">
         <BotPause enPause={pause} />
         <span className="text-sm text-slate-600 dark:text-slate-400">
@@ -106,6 +130,10 @@ export default async function Page() {
         {cfg.moyenneMobileJours} jours · stop loss {cfg.sorties.stopLossPct} % · au plus{" "}
         {cfg.ordres.maxParJour} ordres par jour, minimum {euro(cfg.ordres.minEuros)} · frais{" "}
         {cfg.couts.fraisPct} % et écart achat/vente {cfg.couts.ecartPct} %
+        <br />
+        Frais simulés déjà prélevés : <strong>{euro(execution.fraisPreleves)}</strong> sur{" "}
+        {execution.ordresPasses} ordre(s) · réinvestissement mensuel des gains :{" "}
+        <strong>{cfg.reinvestissement.actif ? "activé" : "désactivé"}</strong>
       </p>
 
       {/* Les règles */}
@@ -116,6 +144,45 @@ export default async function Page() {
         <Limite label="Perte de la semaine" valeur={dernier?.detail?.pertes?.semaine ?? null} seuil={cfg.pertes.semaine} />
         <Limite label="Perte du mois" valeur={dernier?.detail?.pertes?.mois ?? null} seuil={cfg.pertes.mois} />
       </div>
+      {/* Plancher total : le garde-fou définitif */}
+      <div className="mt-4 rounded-2xl border border-slate-300 bg-slate-50 p-5 dark:border-slate-700 dark:bg-slate-900/50">
+        <h3 className="font-semibold">
+          Plancher total — {cfg.pertes.plancherTotalPct} % du capital de référence
+        </h3>
+        <dl className="mt-3 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-3">
+          <div className="flex gap-2">
+            <dt className="text-slate-500">Capital de référence :</dt>
+            <dd className="font-medium">
+              {execution.capitalReference === null ? "—" : euro(execution.capitalReference)}
+            </dd>
+          </div>
+          <div className="flex gap-2">
+            <dt className="text-slate-500">Plancher :</dt>
+            <dd className="font-medium">
+              {execution.plancherTotal === null ? "—" : euro(execution.plancherTotal)}
+            </dd>
+          </div>
+          <div className="flex gap-2">
+            <dt className="text-slate-500">Valeur actuelle :</dt>
+            <dd
+              className={`font-medium ${
+                execution.plancherTotal !== null && etat.valeurTotale <= execution.plancherTotal
+                  ? "text-red-600 dark:text-red-400"
+                  : "text-emerald-600 dark:text-emerald-400"
+              }`}
+            >
+              {euro(etat.valeurTotale)}
+            </dd>
+          </div>
+        </dl>
+        <p className="mt-3 text-xs text-slate-500">
+          Si la valeur touche le plancher, le bot s&apos;arrête{" "}
+          <strong>définitivement</strong> : il ne reprend que si tu le réactives toi-même avec
+          le bouton ci-dessus. Contrairement aux limites du jour, de la semaine et du mois, ce
+          plancher ne se lève jamais tout seul.
+        </p>
+      </div>
+
       <p className="mt-3 text-xs text-slate-500">
         Journées de minuit à minuit, heure de {cfg.fuseau.replace("Europe/", "")}. La limite
         quotidienne de {euro(cfg.pertes.blocageJour)} arrête le bot jusqu&apos;au lendemain ;
@@ -123,6 +190,79 @@ export default async function Page() {
         réactivation. Ces montants sont écrits dans le code, pas dans une variable
         d&apos;environnement.
       </p>
+
+      {/* Capital mois par mois */}
+      <h2 className="mt-10 text-xl font-bold">Capital mois par mois</h2>
+      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+        Le <strong>capital de référence</strong> est la base du plancher total.{" "}
+        {cfg.reinvestissement.actif ? (
+          <>
+            Le réinvestissement est <strong>activé</strong> : à la fin de chaque mois, les gains
+            s&apos;ajoutent au capital de référence du mois suivant. Les pertes ne le baissent
+            jamais, donc les gains acquis sont verrouillés.
+          </>
+        ) : (
+          <>
+            Le réinvestissement est <strong>désactivé</strong> (réglage par défaut) : le capital
+            de référence reste à {euro(cfg.capitalDepart)}. Pour l&apos;activer, passer{" "}
+            <code>reinvestissement.actif</code> à <code>true</code> dans{" "}
+            <code>config/bot-regles.ts</code>.
+          </>
+        )}
+      </p>
+
+      {mois.length === 0 ? (
+        <p className="mt-3 text-sm text-slate-600 dark:text-slate-400">
+          Le tableau se remplira après la première exécution.
+        </p>
+      ) : (
+        <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-200 dark:border-slate-800">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-left dark:bg-slate-900/50">
+              <tr>
+                <th className="px-4 py-3 font-semibold">Mois</th>
+                <th className="px-4 py-3 font-semibold">Capital de référence</th>
+                <th className="px-4 py-3 font-semibold">Valeur en fin de mois</th>
+                <th className="px-4 py-3 font-semibold">Gain / perte</th>
+                <th className="px-4 py-3 font-semibold">Réinvesti</th>
+                <th className="px-4 py-3 font-semibold">État</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mois.map((m) => {
+                const ecart =
+                  m.valeurFin === null ? null : m.valeurFin - m.capitalReference;
+                return (
+                  <tr key={m.mois} className="border-t border-slate-200 dark:border-slate-800">
+                    <td className="px-4 py-3 font-medium">{m.mois}</td>
+                    <td className="px-4 py-3">{euro(m.capitalReference)}</td>
+                    <td className="px-4 py-3">
+                      {m.valeurFin === null ? "—" : euro(m.valeurFin)}
+                    </td>
+                    <td
+                      className={`px-4 py-3 font-semibold ${
+                        ecart === null
+                          ? ""
+                          : ecart >= 0
+                            ? "text-emerald-600 dark:text-emerald-400"
+                            : "text-red-600 dark:text-red-400"
+                      }`}
+                    >
+                      {ecart === null ? "—" : `${ecart >= 0 ? "+" : ""}${euro(ecart)}`}
+                    </td>
+                    <td className="px-4 py-3">
+                      {m.gainReinvesti > 0 ? euro(m.gainReinvesti) : "—"}
+                    </td>
+                    <td className="px-4 py-3 text-slate-500">
+                      {m.cloture ? "clos" : "en cours"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Positions ouvertes */}
       {etat.positions.length > 0 && (

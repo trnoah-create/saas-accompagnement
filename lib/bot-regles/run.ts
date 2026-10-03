@@ -26,6 +26,8 @@ import {
   type Pertes,
 } from "../limites";
 import { deciderOrdres, type Historiques, type Prix, type RefusBot } from "./decider";
+import { envoyerAlerte } from "../alertes";
+import { capitalDuMois, suivreValeurDuMois } from "./capital";
 
 export { jourDeLExperience };
 
@@ -34,7 +36,9 @@ export type StatutBot =
   | "aucun_ordre"
   | "en_pause"
   | "blocage_jour"
-  | "pause_auto";
+  | "pause_auto"
+  /** Plancher total atteint : arrêt définitif jusqu'à réactivation. */
+  | "arret_total";
 
 export type CompteBot = {
   day: string;
@@ -53,6 +57,12 @@ export type CompteBot = {
     jourDeLExperience?: number;
     /** Profondeur d'historique obtenue par actif, pour vérifier le « 1 an ». */
     historiques?: Record<string, number>;
+    /** Capital de référence du mois, base du plancher total. */
+    capitalReference?: number;
+    /** Plancher total en euros, en dessous duquel le bot s'arrête. */
+    plancherTotal?: number;
+    /** Actifs dont aucune source de prix n'a répondu (prix inventés). */
+    prixInventes?: string[];
   };
   erreur: string | null;
 };
@@ -71,11 +81,21 @@ export async function botEnPause(): Promise<boolean> {
   return Number(r?.paused ?? 0) === 1;
 }
 
-export async function mettreBotEnPause(pause: boolean): Promise<void> {
+/** Motif de l'arrêt en cours, ou null si le bot tourne. */
+export async function motifPause(): Promise<string | null> {
+  const r = await queryOne<{ paused: number; paused_reason: string | null }>(
+    "SELECT paused, paused_reason FROM bot_portfolio WHERE id = 1",
+  );
+  if (!r || Number(r.paused) !== 1) return null;
+  return r.paused_reason ?? null;
+}
+
+export async function mettreBotEnPause(pause: boolean, motif?: string): Promise<void> {
   await query(
-    `INSERT INTO bot_portfolio (id, cash, start_capital, paused) VALUES (1, $2, $2, $1)
-     ON CONFLICT (id) DO UPDATE SET paused = $1`,
-    [pause ? 1 : 0, cfg.capitalDepart],
+    `INSERT INTO bot_portfolio (id, cash, start_capital, paused, paused_reason)
+     VALUES (1, $2, $2, $1, $3)
+     ON CONFLICT (id) DO UPDATE SET paused = $1, paused_reason = $3`,
+    [pause ? 1 : 0, cfg.capitalDepart, pause ? (motif ?? null) : null],
   );
 }
 
@@ -168,6 +188,10 @@ export async function executerJourneeBot(maintenant = new Date()): Promise<Compt
     erreur: null,
   };
 
+  // Une journée sautée mérite une alerte, même si le bot est en pause :
+  // c'est la tâche planifiée qui est en cause, pas le bot.
+  await verifierJourneesManquantes(jour);
+
   if (await botEnPause()) {
     const c: CompteBot = {
       ...base,
@@ -185,28 +209,49 @@ export async function executerJourneeBot(maintenant = new Date()): Promise<Compt
   const prix: Prix = {};
   const historiques: Historiques = {};
   const profondeurs: Record<string, number> = {};
-  for (const a of idsActifs()) {
-    const { bars } = await getPrices(a as AssetId, cfg.historique.jours, cfg.historique.minimum);
-    historiques[a] = bars as Bar[];
-    profondeurs[a] = bars.length;
-    prix[a] = bars.at(-1)?.close ?? 0;
-  }
+  const prixInventes: string[] = [];
+
+  const charger = async (a: string) => {
+    const serie = await getPrices(a as AssetId, cfg.historique.jours, cfg.historique.minimum);
+    historiques[a] = serie.bars as Bar[];
+    profondeurs[a] = serie.bars.length;
+    prix[a] = serie.bars.at(-1)?.close ?? 0;
+
+    // Aucune source n'a répondu : les prix sont inventés. On alerte, et on
+    // le consigne dans le compte rendu.
+    if (serie.source === "demo") {
+      prixInventes.push(a);
+      const causes = serie.tentatives
+        .map((t) => `${t.source} : ${t.message}`)
+        .join("\n");
+      await envoyerAlerte({
+        type: "prix_indisponible",
+        cle: `prix_indisponible:${a}:${jour}`,
+        titre: `Aucune source de prix pour ${a}`,
+        message:
+          `Le ${jour}, aucune source n'a répondu pour ${a}. Les prix utilisés sont ` +
+          `INVENTÉS et le bot peut prendre des décisions sur des chiffres faux.\n\n` +
+          `Causes exactes :\n${causes}`,
+      });
+    }
+  };
+
+  for (const a of idsActifs()) await charger(a);
   // Les positions encore ouvertes sur un actif désactivé doivent aussi
   // être valorisées, sinon le bot ne pourrait plus les vendre.
   for (const p of etat.positions) {
-    if (prix[p.asset] !== undefined) continue;
-    const { bars } = await getPrices(
-      p.asset as AssetId,
-      cfg.historique.jours,
-      cfg.historique.minimum,
-    );
-    historiques[p.asset] = bars as Bar[];
-    profondeurs[p.asset] = bars.length;
-    prix[p.asset] = bars.at(-1)?.close ?? 0;
+    if (prix[p.asset] === undefined) await charger(p.asset);
   }
 
   const temoin = await valeurTemoin(prix);
   const ouvertures = await suivreValeur(jour, etat.valeurTotale);
+
+  // Capital de référence du mois : base du plancher total, et point
+  // d'application du réinvestissement.
+  const capital = await capitalDuMois(jour, etat.valeurTotale);
+  // Rafraîchi dès maintenant : le tableau mensuel doit rester juste même
+  // les jours où le bot est bloqué et ne passe aucun ordre.
+  await suivreValeurDuMois(jour, etat.valeurTotale);
 
   const chiffres = (valeur: number) => ({
     valeur,
@@ -219,40 +264,82 @@ export async function executerJourneeBot(maintenant = new Date()): Promise<Compt
   });
 
   // ── Limites de perte ──
-  const limites = evaluerLimites(etat.valeurTotale, ouvertures, cfg);
+  const limites = evaluerLimites(
+    etat.valeurTotale,
+    ouvertures,
+    cfg,
+    capital.capitalReference,
+  );
+
+  const plancherTotal = capital.capitalReference * (cfg.pertes.plancherTotalPct / 100);
+  const detailCommun = {
+    executes: [],
+    refuses: [],
+    pertes: limites.pertes,
+    jourDeLExperience: numeroJour,
+    historiques: profondeurs,
+    capitalReference: capital.capitalReference,
+    plancherTotal,
+    prixInventes,
+  };
+
+  // ── Plancher total : arrêt définitif ──
+  if (limites.action === "arret_total") {
+    await mettreBotEnPause(true, limites.motif);
+    await envoyerAlerte({
+      type: "perte_totale",
+      cle: `perte_totale:${jour}`,
+      titre: "Bot arrêté : plancher total atteint",
+      message:
+        `${limites.motif}\n\n` +
+        `Le bot ne passera plus aucun ordre tant que tu ne l'auras pas réactivé ` +
+        `depuis la page du bot.`,
+    });
+    const c: CompteBot = {
+      ...base,
+      ...chiffres(etat.valeurTotale),
+      statut: "arret_total",
+      resume: limites.motif,
+      detail: detailCommun,
+    };
+    await enregistrer(c);
+    return c;
+  }
 
   if (limites.action === "pause") {
-    await mettreBotEnPause(true);
+    await mettreBotEnPause(true, limites.motif);
+    await envoyerAlerte({
+      type: limites.pertes.mois !== null && limites.pertes.mois >= cfg.pertes.mois
+        ? "perte_mois"
+        : "perte_semaine",
+      cle: `pause_auto:${jour}`,
+      titre: "Bot mis en pause : limite de perte dépassée",
+      message: `${limites.motif}\n\nRéactivation manuelle depuis la page du bot.`,
+    });
     const c: CompteBot = {
       ...base,
       ...chiffres(etat.valeurTotale),
       statut: "pause_auto",
       resume: limites.motif,
-      detail: {
-        executes: [],
-        refuses: [],
-        pertes: limites.pertes,
-        jourDeLExperience: numeroJour,
-        historiques: profondeurs,
-      },
+      detail: detailCommun,
     };
     await enregistrer(c);
     return c;
   }
 
   if (limites.action === "bloquer_jour") {
+    await envoyerAlerte({
+      type: "perte_jour",
+      cle: `perte_jour:${jour}`,
+      titre: "Limite de perte quotidienne atteinte",
+      message: `${limites.motif}\n\nLe bot reprendra automatiquement demain.`,
+    });
     const c: CompteBot = {
       ...base,
       ...chiffres(etat.valeurTotale),
       statut: "blocage_jour",
       resume: limites.motif,
-      detail: {
-        executes: [],
-        refuses: [],
-        pertes: limites.pertes,
-        jourDeLExperience: numeroJour,
-        historiques: profondeurs,
-      },
+      detail: detailCommun,
     };
     await enregistrer(c);
     return c;
@@ -289,6 +376,7 @@ export async function executerJourneeBot(maintenant = new Date()): Promise<Compt
 
   const apres = await etatBot();
   await suivreValeur(jour, apres.valeurTotale);
+  await suivreValeurDuMois(jour, apres.valeurTotale);
 
   const resume =
     executes.length === 0
@@ -304,17 +392,47 @@ export async function executerJourneeBot(maintenant = new Date()): Promise<Compt
     statut: executes.length > 0 ? "ordres" : "aucun_ordre",
     resume,
     detail: {
+      ...detailCommun,
       executes,
       refuses,
       signaux: plan.signaux,
-      pertes: limites.pertes,
       alerte,
-      jourDeLExperience: numeroJour,
-      historiques: profondeurs,
     },
   };
   await enregistrer(c);
   return c;
+}
+
+/**
+ * Alerte si des journées se sont écoulées sans exécution.
+ *
+ * ⚠️ Limite assumée : une tâche planifiée complètement à l'arrêt ne peut
+ * pas se signaler elle-même. Le trou est donc détecté ici, à la PROCHAINE
+ * exécution, et affiché en permanence sur /diagnostic.
+ */
+async function verifierJourneesManquantes(jour: string): Promise<void> {
+  const dernier = await queryOne<{ day: string }>(
+    "SELECT to_char(day, 'YYYY-MM-DD') AS day FROM bot_reports ORDER BY day DESC LIMIT 1",
+  );
+  if (!dernier) return; // première exécution : rien à comparer
+
+  const precedent = String(dernier.day);
+  if (precedent >= jour) return;
+
+  const ecart = Math.round(
+    (Date.parse(`${jour}T00:00:00Z`) - Date.parse(`${precedent}T00:00:00Z`)) / 86_400_000,
+  );
+  if (ecart <= 1) return; // la veille : tout va bien
+
+  await envoyerAlerte({
+    type: "tache_manquante",
+    cle: `tache_manquante:${jour}`,
+    titre: `${ecart - 1} journée(s) sans exécution`,
+    message:
+      `La dernière exécution datait du ${precedent}, la suivante est celle du ${jour} : ` +
+      `${ecart - 1} journée(s) ont été sautées. La tâche quotidienne n'a pas tourné ` +
+      `pendant ce temps (Vercel → Settings → Cron Jobs pour vérifier).`,
+  });
 }
 
 // ─── Lecture pour l'interface ────────────────────────────────────────
@@ -371,6 +489,20 @@ export type EtatExecutionBot = {
   /** Nombre de journées exécutées. */
   journeesExecutees: number;
   enPause: boolean;
+  /** Motif de l'arrêt, s'il y en a un. */
+  motifPause: string | null;
+  /** Heures écoulées depuis la dernière exécution, ou null si jamais lancé. */
+  heuresDepuisExecution: number | null;
+  /** true si la tâche semble en panne (retard au-delà du seuil configuré). */
+  tacheEnRetard: boolean;
+  /** Total des frais simulés prélevés depuis le départ. */
+  fraisPreleves: number;
+  /** Capital de référence du mois en cours. */
+  capitalReference: number | null;
+  /** Plancher total en euros : en dessous, arrêt définitif. */
+  plancherTotal: number | null;
+  /** Réinvestissement mensuel activé ? */
+  reinvestissement: boolean;
 };
 
 export async function etatExecutionBot(): Promise<EtatExecutionBot> {
@@ -387,12 +519,28 @@ export async function etatExecutionBot(): Promise<EtatExecutionBot> {
 
   const total = await queryOne<{ n: number }>("SELECT count(*)::int AS n FROM bot_orders");
   const journees = await queryOne<{ n: number }>("SELECT count(*)::int AS n FROM bot_reports");
+  const frais = await queryOne<{ total: number }>(
+    "SELECT coalesce(sum(fee), 0) AS total FROM bot_orders",
+  );
   const duJour = dernier
     ? await queryOne<{ n: number }>(
         "SELECT count(*)::int AS n FROM bot_orders WHERE day = $1",
         [dernier.day],
       )
     : undefined;
+
+  // Retard mesuré sur l'horodatage réel du dernier compte rendu.
+  const ecart = await queryOne<{ heures: number }>(
+    `SELECT extract(epoch FROM (now() - max(created_at))) / 3600 AS heures
+     FROM bot_reports`,
+  );
+  const heures =
+    ecart?.heures === null || ecart?.heures === undefined ? null : Number(ecart.heures);
+
+  const mois = await queryOne<{ capital_reference: number }>(
+    "SELECT capital_reference FROM bot_capital ORDER BY mois DESC LIMIT 1",
+  );
+  const capitalReference = mois ? Number(mois.capital_reference) : null;
 
   return {
     derniereExecution: dernier ? String(dernier.day) : null,
@@ -403,5 +551,15 @@ export async function etatExecutionBot(): Promise<EtatExecutionBot> {
     ordresDernierJour: Number(duJour?.n ?? 0),
     journeesExecutees: Number(journees?.n ?? 0),
     enPause: await botEnPause(),
+    motifPause: await motifPause(),
+    heuresDepuisExecution: heures,
+    tacheEnRetard: heures !== null && heures > cfg.alertes.retardMaxHeures,
+    fraisPreleves: Number(frais?.total ?? 0),
+    capitalReference,
+    plancherTotal:
+      capitalReference === null
+        ? null
+        : capitalReference * (cfg.pertes.plancherTotalPct / 100),
+    reinvestissement: cfg.reinvestissement.actif,
   };
 }

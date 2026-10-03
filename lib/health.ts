@@ -5,6 +5,7 @@ import { motDePasseConfigure } from "./session";
 import { courtier } from "./broker";
 import { botReglesConfig } from "../config/bot-regles";
 import { etatExecutionBot, type EtatExecutionBot } from "./bot-regles/run";
+import { canauxConfigures, dernieresAlertes, type LigneAlerte } from "./alertes";
 
 export type EtatBase = {
   configuree: boolean;
@@ -45,6 +46,12 @@ export type EtatBotAuto = {
   moyenneMobileJours: number;
   stopLossPct: number;
   perteMaxJourEuros: number;
+  plancherTotalPct: number;
+  retardMaxHeures: number;
+  /** Canaux d'alerte configurés. */
+  alertes: { webhook: boolean; email: boolean };
+  /** Dernières alertes enregistrées. */
+  dernieresAlertes: LigneAlerte[];
 } & EtatExecutionBot;
 
 export async function etatBotAuto(): Promise<EtatBotAuto> {
@@ -53,6 +60,10 @@ export async function etatBotAuto(): Promise<EtatBotAuto> {
 
   return {
     cronSecret: Boolean(process.env.CRON_SECRET),
+    plancherTotalPct: botReglesConfig.pertes.plancherTotalPct,
+    retardMaxHeures: botReglesConfig.alertes.retardMaxHeures,
+    alertes: canauxConfigures(),
+    dernieresAlertes: await dernieresAlertes(8),
     courtierNom: broker.nom,
     courtierReel: broker.reel,
     actifs: botReglesConfig.actifs.map((a) => ({

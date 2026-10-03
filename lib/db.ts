@@ -266,9 +266,35 @@ const SCHEMA: string[] = [
      reason     text NOT NULL DEFAULT '',
      created_at timestamptz NOT NULL DEFAULT now()
    )`,
+  // Motif d'un arrêt : vide tant que le bot tourne, rempli par un plancher
+  // atteint. Ajouté après coup, d'où le ALTER.
+  `ALTER TABLE bot_portfolio ADD COLUMN IF NOT EXISTS paused_reason text`,
   `CREATE TABLE IF NOT EXISTS bot_benchmark (
      asset    text PRIMARY KEY,
      quantity double precision NOT NULL
+   )`,
+  // Alertes envoyées. `cle` rend l'envoi idempotent : une même alerte ne
+  // part jamais deux fois, même si la tâche est relancée.
+  `CREATE TABLE IF NOT EXISTS bot_alertes (
+     id         integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+     cle        text NOT NULL UNIQUE,
+     type       text NOT NULL,
+     titre      text NOT NULL,
+     message    text NOT NULL DEFAULT '',
+     canaux     text NOT NULL DEFAULT '',
+     erreur     text,
+     created_at timestamptz NOT NULL DEFAULT now()
+   )`,
+  // Capital de référence par mois : base du plancher total, et trace de
+  // l'éventuel réinvestissement des gains.
+  `CREATE TABLE IF NOT EXISTS bot_capital (
+     mois                text PRIMARY KEY,
+     capital_reference   double precision NOT NULL,
+     valeur_debut        double precision,
+     valeur_fin          double precision,
+     gain_reinvesti      double precision NOT NULL DEFAULT 0,
+     cloture             integer NOT NULL DEFAULT 0,
+     created_at          timestamptz NOT NULL DEFAULT now()
    )`,
   `CREATE TABLE IF NOT EXISTS bot_equity (
      day         date PRIMARY KEY,

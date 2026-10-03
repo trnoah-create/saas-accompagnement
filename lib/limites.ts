@@ -66,13 +66,17 @@ export type Decision =
   | { action: "continuer"; alerte: false; pertes: Pertes }
   | { action: "alerte"; alerte: true; motif: string; pertes: Pertes }
   | { action: "bloquer_jour"; alerte: true; motif: string; pertes: Pertes }
-  | { action: "pause"; alerte: true; motif: string; pertes: Pertes };
+  | { action: "pause"; alerte: true; motif: string; pertes: Pertes }
+  /** Arrêt définitif : seule une réactivation manuelle le lève. */
+  | { action: "arret_total"; alerte: true; motif: string; pertes: Pertes };
 
 export type Pertes = {
   /** Perte en euros (valeur positive = perte, 0 ou négatif = pas de perte). */
   jour: number | null;
   semaine: number | null;
   mois: number | null;
+  /** Perte depuis le capital de référence, en euros. */
+  total: number | null;
 };
 
 function perte(valeur: number, ouverture: number | null): number | null {
@@ -96,21 +100,49 @@ export type SeuilsPertes = {
     readonly blocageJour: number;
     readonly semaine: number;
     readonly mois: number;
+    readonly plancherTotalPct: number;
   };
 };
 
+/**
+ * @param capitalReference Capital servant de base au plancher total. Omis,
+ *   le plancher n'est pas évalué.
+ */
 export function evaluerLimites(
   valeurActuelle: number,
   ouvertures: Ouvertures,
   config: SeuilsPertes,
+  capitalReference?: number,
 ): Decision {
   const pertes: Pertes = {
     jour: perte(valeurActuelle, ouvertures.jour),
     semaine: perte(valeurActuelle, ouvertures.semaine),
     mois: perte(valeurActuelle, ouvertures.mois),
+    total:
+      capitalReference === undefined || capitalReference <= 0
+        ? null
+        : perte(valeurActuelle, capitalReference),
   };
 
   const seuils = config.pertes;
+
+  // Le plancher total l'emporte sur tout le reste : c'est le garde-fou
+  // ultime, et il est définitif.
+  if (capitalReference !== undefined && capitalReference > 0) {
+    const plancher = capitalReference * (seuils.plancherTotalPct / 100);
+    if (valeurActuelle <= plancher) {
+      return {
+        action: "arret_total",
+        alerte: true,
+        motif:
+          `Plancher total atteint : le portefeuille vaut ${euros(valeurActuelle)}, ` +
+          `soit ${seuils.plancherTotalPct} % ou moins du capital de référence de ` +
+          `${euros(capitalReference)} (plancher à ${euros(plancher)}). ` +
+          `Le bot s'arrête définitivement et attend une réactivation manuelle.`,
+        pertes,
+      };
+    }
+  }
 
   if (pertes.mois !== null && pertes.mois >= seuils.mois) {
     return {

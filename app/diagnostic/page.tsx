@@ -86,6 +86,22 @@ export default async function Page() {
               ? "CRON_SECRET défini, le bot peut s'exécuter chaque jour"
               : "CRON_SECRET manquant, la tâche quotidienne est fermée"}
           </li>
+          {bot && (
+            <li>
+              {bot.tacheEnRetard ? "❌" : "✅"} Dernière exécution :{" "}
+              {bot.heuresDepuisExecution === null
+                ? "le bot n'a jamais tourné"
+                : bot.tacheEnRetard
+                  ? `il y a ${Math.round(bot.heuresDepuisExecution)} h — la tâche semble en panne (seuil ${bot.retardMaxHeures} h)`
+                  : `il y a ${Math.round(bot.heuresDepuisExecution)} h, dans les délais`}
+            </li>
+          )}
+          <li>
+            {bot?.alertes.webhook || bot?.alertes.email ? "✅" : "⚠️"} Alertes :{" "}
+            {bot?.alertes.webhook || bot?.alertes.email
+              ? `envoyées par ${[bot.alertes.email && "email", bot.alertes.webhook && "notification"].filter(Boolean).join(" et ")}`
+              : "aucun canal configuré — les alertes restent visibles sur cette page uniquement"}
+          </li>
         </ul>
         {!toutVaBien && (
           <p className="mt-4 text-sm">
@@ -144,10 +160,45 @@ export default async function Page() {
             </p>
           )}
 
+          {bot.motifPause && (
+            <p
+              role="alert"
+              className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900 dark:border-red-800 dark:bg-red-950/50 dark:text-red-200"
+            >
+              Arrêté — réactivation manuelle nécessaire : {bot.motifPause}
+            </p>
+          )}
+
+          <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+            <div className="flex flex-wrap gap-2">
+              <dt className="text-slate-500">Capital de référence :</dt>
+              <dd className="font-medium">
+                {bot.capitalReference === null ? "—" : euro(bot.capitalReference)}
+              </dd>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <dt className="text-slate-500">
+                Plancher total ({bot.plancherTotalPct} %) :
+              </dt>
+              <dd className="font-medium">
+                {bot.plancherTotal === null ? "—" : euro(bot.plancherTotal)}
+              </dd>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <dt className="text-slate-500">Frais simulés prélevés :</dt>
+              <dd className="font-medium">{euro(bot.fraisPreleves)}</dd>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <dt className="text-slate-500">Réinvestissement mensuel :</dt>
+              <dd className="font-medium">{bot.reinvestissement ? "activé" : "désactivé"}</dd>
+            </div>
+          </dl>
+
           <div className="text-sm text-slate-600 dark:text-slate-400">
             Règles appliquées : achat au-dessus de la moyenne{" "}
             {bot.moyenneMobileJours} jours, vente en dessous, stop loss à {bot.stopLossPct} %,
-            arrêt de la journée à {euro(bot.perteMaxJourEuros)} de perte.
+            arrêt de la journée à {euro(bot.perteMaxJourEuros)} de perte, arrêt définitif sous{" "}
+            {bot.plancherTotalPct} % du capital de référence.
             <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
               {bot.actifs.map((a) => (
                 <li key={a.id}>
@@ -165,6 +216,80 @@ export default async function Page() {
           </p>
         </div>
       )}
+
+      {/* Alertes */}
+      <h2 className="mt-10 text-xl font-bold">Alertes</h2>
+      <div className="mt-4 space-y-4 rounded-2xl border border-slate-200 p-5 dark:border-slate-800">
+        <div className="flex flex-wrap items-center gap-3">
+          <Pastille
+            ok={Boolean(bot?.alertes.email)}
+            texte={bot?.alertes.email ? "Email configuré" : "Email non configuré"}
+          />
+          <Pastille
+            ok={Boolean(bot?.alertes.webhook)}
+            texte={bot?.alertes.webhook ? "Notification configurée" : "Notification non configurée"}
+          />
+        </div>
+
+        <p className="text-sm text-slate-600 dark:text-slate-400">
+          Le bot t&apos;alerte quand la <strong>limite de perte quotidienne</strong> ou le{" "}
+          <strong>plancher total</strong> sont atteints, quand la <strong>tâche
+          quotidienne échoue</strong> ou <strong>a sauté des journées</strong>, et quand{" "}
+          <strong>toutes les sources de prix d&apos;un actif échouent</strong>.
+        </p>
+
+        {!bot?.alertes.email && !bot?.alertes.webhook && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+            <p className="font-medium">Aucun canal configuré pour l&apos;instant.</p>
+            <p className="mt-1">
+              Les alertes restent enregistrées et visibles ci-dessous, mais rien ne t&apos;est
+              envoyé. Pour recevoir un email, ajoute <code>RESEND_API_KEY</code> et{" "}
+              <code>ALERTE_EMAIL</code> dans Vercel. Pour une notification (Discord, Slack,
+              ntfy…), ajoute <code>ALERTE_WEBHOOK_URL</code>. Les deux peuvent coexister ; la
+              marche à suivre est dans le <code>README.md</code>.
+            </p>
+          </div>
+        )}
+
+        {bot && bot.dernieresAlertes.length === 0 && (
+          <p className="text-sm text-slate-600 dark:text-slate-400">
+            Aucune alerte à ce jour — c&apos;est bon signe.
+          </p>
+        )}
+
+        {bot && bot.dernieresAlertes.length > 0 && (
+          <div>
+            <h3 className="text-xs font-semibold tracking-wide text-slate-500 uppercase">
+              Dernières alertes
+            </h3>
+            <ul className="mt-2 space-y-3">
+              {bot.dernieresAlertes.map((a) => (
+                <li
+                  key={a.id}
+                  className="rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-800"
+                >
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <span className="font-medium">{a.titre}</span>
+                    <span className="text-xs text-slate-500">{a.created_at}</span>
+                  </div>
+                  <p className="mt-1 whitespace-pre-line text-slate-600 dark:text-slate-400">
+                    {a.message}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {a.canaux ? `Envoyée par : ${a.canaux}` : "Non envoyée"}
+                    {a.erreur && ` · ${a.erreur}`}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <p className="text-xs text-slate-500">
+          Aucune clé d&apos;alerte n&apos;est affichée sur cette page. Un envoi qui échoue ne
+          bloque jamais le bot : l&apos;alerte reste enregistrée ici.
+        </p>
+      </div>
 
       {/* Accès */}
       <h2 className="mt-10 text-xl font-bold">Mot de passe du site</h2>

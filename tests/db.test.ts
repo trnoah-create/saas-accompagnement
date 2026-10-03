@@ -6,6 +6,10 @@ import { PGlite } from "@electric-sql/pglite";
 import { setRunner, ensureSchema, query, transaction } from "../lib/db";
 import { getPortfolio, buy, sell, getOrders, resetPortfolio } from "../lib/portfolio";
 import { getBot, saveBot } from "../lib/bot";
+import { envoyerAlerte, dernieresAlertes } from "../lib/alertes";
+import { capitalDuMois, historiqueCapital, suivreValeurDuMois } from "../lib/bot-regles/capital";
+import { botEnPause, mettreBotEnPause, motifPause } from "../lib/bot-regles/run";
+import { botReglesConfig } from "../config/bot-regles";
 
 let reussis = 0;
 async function test(nom: string, fn: () => Promise<void>) {
@@ -202,6 +206,152 @@ function brancher(pg: PGlite) {
   });
 
   await vieux.close();
+
+  // ─── Alertes et capital mensuel, sur une base neuve ────────────────
+
+  const pg2 = new PGlite();
+  brancher(pg2);
+  await ensureSchema();
+
+  console.log("\nAlertes");
+
+  await test("une alerte est enregistrée et marquée comme non envoyée", async () => {
+    const envoyee = await envoyerAlerte({
+      type: "perte_jour",
+      cle: "perte_jour:2026-10-03",
+      titre: "Limite quotidienne atteinte",
+      message: "Perte de 3,00 €.",
+    });
+    assert.equal(envoyee, true, "la première alerte doit partir");
+
+    const lignes = await dernieresAlertes(10);
+    assert.equal(lignes.length, 1);
+    assert.equal(lignes[0].type, "perte_jour");
+    assert.equal(lignes[0].canaux, "", "aucun canal configuré en test");
+    assert.match(lignes[0].erreur ?? "", /aucun canal configuré/);
+  });
+
+  await test("la même alerte n'est jamais envoyée deux fois", async () => {
+    const encore = await envoyerAlerte({
+      type: "perte_jour",
+      cle: "perte_jour:2026-10-03",
+      titre: "Limite quotidienne atteinte",
+      message: "Perte de 3,00 €.",
+    });
+    assert.equal(encore, false, "la relance ne doit rien renvoyer");
+    assert.equal((await dernieresAlertes(10)).length, 1, "pas de doublon en base");
+  });
+
+  await test("une clé différente passe bien", async () => {
+    assert.equal(
+      await envoyerAlerte({
+        type: "prix_indisponible",
+        cle: "prix_indisponible:SPY:2026-10-03",
+        titre: "Aucune source pour SPY",
+        message: "Toutes les sources ont échoué.",
+      }),
+      true,
+    );
+    const lignes = await dernieresAlertes(10);
+    assert.equal(lignes.length, 2);
+    assert.equal(lignes[0].type, "prix_indisponible", "la plus récente d'abord");
+  });
+
+  console.log("\nCapital mois par mois");
+
+  await test("le premier mois part du capital de départ", async () => {
+    const m = await capitalDuMois("2026-10-03", 100);
+    assert.equal(m.mois, "2026-10");
+    assert.equal(m.capitalReference, botReglesConfig.capitalDepart);
+    assert.equal(m.cloture, false);
+  });
+
+  await test("rappeler le même mois ne crée pas de doublon", async () => {
+    await capitalDuMois("2026-10-20", 110);
+    const lignes = await historiqueCapital(10);
+    assert.equal(lignes.length, 1, "une seule ligne pour octobre");
+  });
+
+  await test("le mois suivant clôt le précédent", async () => {
+    // Valeur de fin d'octobre enregistrée dans la courbe de valeur.
+    await query(
+      `INSERT INTO bot_equity (day, open_value, close_value) VALUES ('2026-10-31', 100, 118)
+       ON CONFLICT (day) DO UPDATE SET close_value = 118`,
+    );
+    const novembre = await capitalDuMois("2026-11-02", 118);
+    assert.equal(novembre.mois, "2026-11");
+
+    const lignes = await historiqueCapital(10);
+    const octobre = lignes.find((l) => l.mois === "2026-10");
+    assert.ok(octobre);
+    assert.equal(octobre.cloture, true, "octobre doit être clos");
+    assert.equal(octobre.valeurFin, 118, "sa valeur de fin vient de bot_equity");
+  });
+
+  await test("sans réinvestissement, le capital de référence ne monte pas", async () => {
+    // L'option est désactivée par défaut : un gain de 18 € ne doit rien changer.
+    assert.equal(botReglesConfig.reinvestissement.actif, false);
+    const lignes = await historiqueCapital(10);
+    const novembre = lignes.find((l) => l.mois === "2026-11");
+    assert.ok(novembre);
+    assert.equal(novembre.capitalReference, botReglesConfig.capitalDepart);
+    const octobre = lignes.find((l) => l.mois === "2026-10");
+    assert.equal(octobre?.gainReinvesti, 0, "rien ne doit être réinvesti");
+  });
+
+  await test("réinvestissement activé : le gain du mois clos monte le capital", async () => {
+    // Novembre finit à 118 € pour un capital de référence de 100 € :
+    // +18 € de gain, donc décembre démarre avec 118 € de référence.
+    await query(
+      `INSERT INTO bot_equity (day, open_value, close_value) VALUES ('2026-11-30', 118, 118)
+       ON CONFLICT (day) DO UPDATE SET close_value = 118`,
+    );
+    const decembre = await capitalDuMois("2026-12-01", 118, true);
+    assert.equal(decembre.capitalReference, 118, "décembre part de 100 € + 18 € de gain");
+
+    // Décembre finit à 140 € : +22 € par rapport à ses 118 € de référence.
+    await query(
+      `INSERT INTO bot_equity (day, open_value, close_value) VALUES ('2026-12-31', 118, 140)
+       ON CONFLICT (day) DO UPDATE SET close_value = 140`,
+    );
+    const janvier = await capitalDuMois("2027-01-04", 140, true);
+    assert.equal(
+      janvier.capitalReference,
+      140,
+      "janvier doit partir de 118 € + 22 € de gain",
+    );
+
+    const decembreClos = (await historiqueCapital(20)).find((l) => l.mois === "2026-12");
+    assert.equal(decembreClos?.gainReinvesti, 22);
+
+    // Et une perte, elle, ne doit rien éroder.
+    await query(
+      `INSERT INTO bot_equity (day, open_value, close_value) VALUES ('2027-01-31', 140, 120)
+       ON CONFLICT (day) DO UPDATE SET close_value = 120`,
+    );
+    const fevrier = await capitalDuMois("2027-02-02", 120, true);
+    assert.equal(fevrier.capitalReference, 140, "une perte ne baisse pas le capital");
+    const janvierClos = (await historiqueCapital(20)).find((l) => l.mois === "2027-01");
+    assert.equal(janvierClos?.gainReinvesti, 0);
+  });
+
+  await test("la valeur du mois en cours se met à jour", async () => {
+    await suivreValeurDuMois("2027-02-10", 123.45);
+    const fevrier = (await historiqueCapital(20)).find((l) => l.mois === "2027-02");
+    assert.equal(fevrier?.valeurFin, 123.45);
+  });
+
+  await test("le motif d'arrêt est conservé puis effacé", async () => {
+    await mettreBotEnPause(true, "Plancher total atteint.");
+    assert.equal(await botEnPause(), true);
+    assert.equal(await motifPause(), "Plancher total atteint.");
+
+    await mettreBotEnPause(false);
+    assert.equal(await botEnPause(), false);
+    assert.equal(await motifPause(), null, "le motif doit disparaître à la réactivation");
+  });
+
+  await pg2.close();
 
   console.log(`\n${reussis} test(s) réussi(s)\n`);
 })();

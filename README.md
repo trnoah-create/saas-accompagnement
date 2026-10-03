@@ -137,6 +137,7 @@ Tous les réglages sont dans un seul fichier :
 | Perte sur une journée | alerte à 1 €, **arrêt de la journée à 3 €** |
 | Perte sur une semaine | 6 € → mise en pause |
 | Perte sur un mois | 15 € → mise en pause |
+| **Plancher total** | **85 % du capital de référence → arrêt définitif** |
 | Ordres par jour | 5 au maximum, 2 € minimum par ordre |
 | Effet de levier, vente à découvert | interdits |
 | Coûts simulés | frais 0,1 % + écart achat/vente 0,1 % |
@@ -148,6 +149,80 @@ Les journées vont de minuit à minuit **heure de Paris**, et les pertes se
 comptent en **euros**, pas en pourcentage. Après un arrêt quotidien, le bot
 reprend le lendemain ; après une pause hebdomadaire ou mensuelle, il attend une
 **réactivation manuelle** via le bouton de la page.
+
+**Le plancher total est le garde-fou ultime.** Si la valeur du portefeuille
+touche 85 % du capital de référence, le bot s'arrête **définitivement** : il ne
+reprendra que si tu le réactives toi-même. Ce plancher est prioritaire sur
+toutes les autres limites, et la page du bot affiche en permanence le capital
+de référence, le plancher en euros et la valeur actuelle.
+
+### Les coûts simulés
+
+Chaque ordre, achat comme vente, supporte **0,1 % de frais** et un **écart
+achat/vente de 0,1 %**. Un aller-retour à prix constant est donc perdant
+d'environ **0,3 %** du montant — c'est voulu : sans cela, un bot qui s'agite
+paraîtrait rentable alors qu'il ne le serait pas. Le total des frais déjà
+prélevés est affiché sur la page du bot et sur `/diagnostic`, et un test
+vérifie qu'un aller-retour immédiat ne peut jamais être gagnant.
+
+### Le réinvestissement mensuel — désactivé par défaut
+
+Le **capital de référence** est la base du plancher total. Par défaut il reste
+à 100 € pour toujours : le plancher est à 85 € quoi qu'il arrive.
+
+Activé (`reinvestissement.actif: true` dans
+[`config/bot-regles.ts`](config/bot-regles.ts)), les gains de chaque mois clos
+s'ajoutent au capital de référence du mois suivant. **Les pertes ne le baissent
+jamais** : il ne peut que monter ou rester stable.
+
+L'effet concret : réinvestir **remonte le plancher**, donc verrouille les gains
+acquis. Après un mois à +50 %, le capital de référence passe à 150 € et le
+plancher à 127,50 € — le bot s'arrêtera bien plus haut qu'au départ.
+
+| Mois | Capital de référence | Valeur en fin de mois | Réinvesti | Capital du mois suivant |
+|---|---|---|---|---|
+| Mois 1 | 100 € | 120 € | 20 € | 120 € |
+| Mois 2 | 120 € | 90 € | — (perte) | 120 € |
+| Mois 3 | 120 € | 130 € | 10 € | 130 € |
+
+La page du bot affiche ce tableau mois par mois, réinvestissement activé ou non.
+
+### Les alertes
+
+Le bot prévient dans cinq situations :
+
+| Situation | Type |
+|---|---|
+| La limite de perte **quotidienne** est atteinte | `perte_jour` |
+| Le **plancher total** est atteint (arrêt définitif) | `perte_totale` |
+| Les limites **hebdomadaire ou mensuelle** mettent le bot en pause | `perte_semaine`, `perte_mois` |
+| La **tâche quotidienne échoue** | `tache_echec` |
+| La tâche **a sauté des journées** | `tache_manquante` |
+| **Toutes les sources de prix** d'un actif échouent | `prix_indisponible` |
+
+Deux étages, et le premier marche toujours :
+
+1. toute alerte est **enregistrée en base** et visible sur `/diagnostic`, même
+   sans aucune configuration ;
+2. si un canal est configuré, elle t'est **envoyée**.
+
+| Variable | À quoi elle sert |
+|---|---|
+| `ALERTE_WEBHOOK_URL` | Une adresse qui reçoit un message JSON. Compatible **Discord**, **Slack**, **ntfy**, Zapier, Make — le corps envoyé contient à la fois `content` (Discord) et `text` (Slack), donc la même adresse marche dans les deux cas. |
+| `RESEND_API_KEY` + `ALERTE_EMAIL` | Un vrai **email**, via [Resend](https://resend.com) (palier gratuit). `ALERTE_EMAIL_FROM` est facultatif. |
+
+Aucun canal n'est obligatoire, les deux peuvent coexister, et **un envoi qui
+échoue ne fait jamais échouer le bot** : l'erreur est notée à côté de l'alerte.
+Chaque alerte porte une clé unique, donc relancer la tâche ne t'envoie jamais
+deux fois le même message.
+
+⚠️ **Une limite à connaître.** Une tâche planifiée complètement à l'arrêt ne
+peut pas se signaler elle-même : personne ne tourne pour envoyer l'alerte. Le
+trou est donc détecté à la **prochaine** exécution, et `/diagnostic` affiche en
+permanence depuis combien d'heures le bot n'a pas tourné (au-delà de 26 heures,
+la ligne passe au rouge). Pour une surveillance réellement extérieure, il
+suffit de faire appeler la même adresse `/api/cron/bot-regles` par un service
+de ping gratuit, avec le même `CRON_SECRET` dans l'en-tête `Authorization`.
 
 **Le déroulé de chaque journée**
 
@@ -217,9 +292,11 @@ app/
   api/cron/           Tâche quotidienne (protégée par CRON_SECRET)
 lib/
   db.ts               Base PostgreSQL (schéma, migration, transactions)
+  alertes.ts          Alertes : enregistrement puis envoi (email, notification)
   broker/             Interface courtier (acheter/vendre/solde/positions)
                       — simulation uniquement
-  bot-regles/         Règles pures (decider.ts) et exécution du jour (run.ts)
+  bot-regles/         Règles pures (decider.ts), exécution du jour (run.ts),
+                      capital mensuel et réinvestissement
   limites.ts          Limites de perte et découpage du temps, partagés
   session.ts          Mot de passe unique et jeton de session signé
   acces.ts            Ouverture et fermeture de session (cookie)
@@ -320,6 +397,32 @@ saisir le mot de passe du site, c'est donc ce secret qui tient la porte. **Sans
 lui, l'adresse reste fermée et le bot ne tourne pas.** Aucune autre clé n'est
 nécessaire : le bot ne contacte aucun service payant.
 
+### Étape 5 bis — Recevoir les alertes (facultatif)
+
+Sans rien faire, les alertes sont déjà **enregistrées et visibles sur
+`/diagnostic`**. Cette étape sert seulement à les recevoir sur ton téléphone.
+
+**Le plus simple — une notification.** Dans Discord : *Paramètres du salon* →
+*Intégrations* → *Webhooks* → *Nouveau webhook* → **Copier l'URL**. Puis, dans
+Vercel, ajoute :
+
+| Key | Value |
+|---|---|
+| `ALERTE_WEBHOOK_URL` | l'URL du webhook que tu viens de copier |
+
+La même variable marche avec Slack (*Incoming Webhook*) ou ntfy.
+
+**Pour un vrai email.** Crée un compte gratuit sur **resend.com**, va dans
+*API Keys* → *Create API Key*, copie la clé, puis ajoute dans Vercel :
+
+| Key | Value |
+|---|---|
+| `RESEND_API_KEY` | la clé que tu viens de copier |
+| `ALERTE_EMAIL` | ton adresse email |
+
+Coche les trois environnements, **Save**, puis redéploie. `/diagnostic` affiche
+ensuite « Email configuré » et/ou « Notification configurée ».
+
 ### Étape 6 — Brancher la base de données gratuite
 
 1. Dans ton projet Vercel → onglet **Storage**.
@@ -347,10 +450,15 @@ Le mot de passe te sera demandé. Cette page te dit ensuite en clair :
   source répond pour chacun ;
 - ✅ **Historique : au moins un an de cotations pour chaque actif** → le bot
   peut calculer sa moyenne 50 jours ;
-- ✅ **Tâche quotidienne : `CRON_SECRET` défini** → le bot peut s'exécuter.
+- ✅ **Tâche quotidienne : `CRON_SECRET` défini** → le bot peut s'exécuter ;
+- ✅ **Dernière exécution : dans les délais** → la tâche tourne bien ;
+- ✅ **Alertes** → le canal choisi est reconnu (ou un rappel que les alertes
+  restent visibles sur la page seulement).
 
 Un bloc **Bot automatique** affiche en plus sa **dernière exécution**, le
-**nombre d'ordres passés** et son dernier compte rendu.
+**nombre d'ordres passés**, le **capital de référence**, le **plancher total**,
+les **frais déjà prélevés** et son dernier compte rendu. Un bloc **Alertes**
+liste les dernières alertes et dit si chacune a pu être envoyée.
 
 Si toutes les lignes sont vertes, c'est terminé.
 
@@ -361,6 +469,9 @@ Si toutes les lignes sont vertes, c'est terminé.
 | « Site pas encore configuré » sur la page d'accès | `SITE_PASSWORD` manque (étape 4), ou tu n'as pas redéployé (étape 7). |
 | « Base de données : pas encore connectée » | L'étape 6 n'a pas abouti, ou tu n'as pas redéployé (étape 7). |
 | « `CRON_SECRET` manquant » | Étape 5 : sans ce secret, le bot ne s'exécute pas. |
+| « la tâche semble en panne » | La tâche n'a pas tourné depuis plus de 26 h. Vercel → **Settings → Cron Jobs** : vérifie qu'elle est active (les crons sont désactivés sur les projets en pause). |
+| « Bot arrêté — réactivation manuelle nécessaire » | Le plancher total a été touché. La raison exacte est affichée ; le bouton de la page du bot le relance. |
+| Une alerte marquée « Non envoyée » | Le canal a refusé l'envoi. Le motif exact figure sous l'alerte (URL invalide, clé Resend refusée…). |
 | « Historique : moins d'un an » sur un actif | Aucune source n'a renvoyé assez de journées. `/diagnostic` indique laquelle a répondu et combien de journées elle a fournies. Le bot attend d'avoir 50 journées closes avant de décider quoi que ce soit. |
 | « Bot automatique : jamais exécuté » | La tâche n'a pas encore tourné. Vercel → **Settings → Cron Jobs** permet de la déclencher à la main. |
 | « Base configurée mais injoignable » | La base Neon est peut-être en veille : recharge la page une fois. |
