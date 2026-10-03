@@ -8,7 +8,7 @@ import {
   jourLocal,
   debutSemaine,
   debutMois,
-} from "../lib/claude-trader/limites";
+} from "../lib/limites";
 import { validerOrdres } from "../lib/claude-trader/valider";
 import { DecisionSchema } from "../lib/claude-trader/schema";
 import { claudeTraderConfig as cfg } from "../config/claude-trader";

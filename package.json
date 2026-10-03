@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test": "tsx tests/engine.test.ts && tsx tests/session.test.ts && tsx tests/market.test.ts && tsx tests/claude-trader.test.ts && tsx --tsconfig tests/tsconfig.json tests/db.test.ts"
+    "test": "tsx tests/engine.test.ts && tsx tests/session.test.ts && tsx tests/market.test.ts && tsx tests/claude-trader.test.ts && tsx tests/bot-regles.test.ts && tsx --tsconfig tests/tsconfig.json tests/db.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",

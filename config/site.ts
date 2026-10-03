@@ -28,6 +28,7 @@ export const siteConfig = {
     { label: "Tableau de bord", href: "/tableau-de-bord" },
     { label: "Bot", href: "/bot" },
     { label: "Claude trader", href: "/claude-trader" },
+    { label: "Bot règles", href: "/bot-regles" },
   ],
 
   login: { label: "Se connecter", href: "/connexion" },

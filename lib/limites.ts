@@ -5,8 +5,8 @@
  * Les pertes sont exprimées en EUROS, pas en pourcentage, et les journées
  * sont découpées de minuit à minuit à l'heure configurée (Paris).
  */
-import { claudeTraderConfig } from "../../config/claude-trader";
-import { euro as euros } from "../format";
+import { claudeTraderConfig } from "../config/claude-trader";
+import { euro as euros } from "./format";
 
 // ─── Découpage du temps ──────────────────────────────────────────────
 
@@ -36,6 +36,17 @@ export function debutSemaine(jour: string): string {
 /** Premier jour du mois contenant ce jour. */
 export function debutMois(jour: string): string {
   return `${jour.slice(0, 7)}-01`;
+}
+
+/**
+ * Numéro du jour dans une expérience à durée fixe : 1 le jour du
+ * démarrage, 2 le lendemain, etc.
+ */
+export function jourDeLExperience(demarreLe: string, jour: string): number {
+  const debut = Date.parse(`${demarreLe}T00:00:00Z`);
+  const courant = Date.parse(`${jour}T00:00:00Z`);
+  if (!Number.isFinite(debut) || !Number.isFinite(courant)) return 1;
+  return Math.floor((courant - debut) / 86400000) + 1;
 }
 
 // ─── Évaluation des limites ──────────────────────────────────────────
@@ -76,10 +87,20 @@ function perte(valeur: number, ouverture: number | null): number | null {
  * Ordre de priorité : pause mensuelle, puis hebdomadaire, puis blocage du
  * jour, puis simple alerte. La règle la plus grave l'emporte.
  */
+/** Seule partie de la configuration dont ce module a besoin. */
+export type SeuilsPertes = {
+  readonly pertes: {
+    readonly alerteJour: number;
+    readonly blocageJour: number;
+    readonly semaine: number;
+    readonly mois: number;
+  };
+};
+
 export function evaluerLimites(
   valeurActuelle: number,
   ouvertures: Ouvertures,
-  config = claudeTraderConfig,
+  config: SeuilsPertes = claudeTraderConfig,
 ): Decision {
   const pertes: Pertes = {
     jour: perte(valeurActuelle, ouvertures.jour),

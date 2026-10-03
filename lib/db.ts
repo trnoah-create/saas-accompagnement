@@ -288,6 +288,53 @@ const SCHEMA: string[] = [
      erreur           text,
      created_at       timestamptz NOT NULL DEFAULT now()
    )`,
+  // ─── Bot à règles fixes : portefeuille encore distinct ────────────
+  `CREATE TABLE IF NOT EXISTS bot_portfolio (
+     id            smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+     cash          double precision NOT NULL,
+     start_capital double precision NOT NULL,
+     started_on    date NOT NULL DEFAULT CURRENT_DATE,
+     paused        integer NOT NULL DEFAULT 0
+   )`,
+  // prix_entree : prix moyen d'achat, nécessaire au stop loss et au take profit.
+  `CREATE TABLE IF NOT EXISTS bot_positions (
+     asset       text PRIMARY KEY,
+     quantity    double precision NOT NULL,
+     prix_entree double precision NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS bot_orders (
+     id         integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+     day        date NOT NULL DEFAULT CURRENT_DATE,
+     asset      text NOT NULL,
+     side       text NOT NULL CHECK (side IN ('buy','sell')),
+     montant    double precision NOT NULL,
+     quantity   double precision NOT NULL,
+     price      double precision NOT NULL,
+     fee        double precision NOT NULL,
+     reason     text NOT NULL DEFAULT '',
+     created_at timestamptz NOT NULL DEFAULT now()
+   )`,
+  `CREATE TABLE IF NOT EXISTS bot_benchmark (
+     asset    text PRIMARY KEY,
+     quantity double precision NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS bot_equity (
+     day         date PRIMARY KEY,
+     open_value  double precision NOT NULL,
+     close_value double precision NOT NULL
+   )`,
+  `CREATE TABLE IF NOT EXISTS bot_reports (
+     day              date PRIMARY KEY,
+     statut           text NOT NULL,
+     valeur           double precision,
+     gain_jour_pct    double precision,
+     valeur_temoin    double precision,
+     temoin_gain_pct  double precision,
+     resume           text NOT NULL DEFAULT '',
+     detail           text NOT NULL DEFAULT '{}',
+     erreur           text,
+     created_at       timestamptz NOT NULL DEFAULT now()
+   )`,
   `CREATE TABLE IF NOT EXISTS price_bars (
      asset  text NOT NULL,
      day    date NOT NULL,

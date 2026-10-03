@@ -150,6 +150,37 @@ pénalisent l'agitation.
 ordre n'est passé** et la raison figure dans le compte rendu. Un bouton met le
 mode en pause à tout moment.
 
+### Bot à règles fixes — sans aucun coût
+
+Un troisième portefeuille fictif de **100 €**, piloté par des règles
+mécaniques. **Aucun appel à une API payante** : son coût de fonctionnement est
+nul. Réglages dans [`config/bot-regles.ts`](config/bot-regles.ts).
+
+| Règle | Valeur |
+|---|---|
+| Stratégie | croisement de moyennes mobiles **20 / 50 jours** |
+| Actifs | Bitcoin, Ethereum |
+| Durée de l'expérience | **60 jours**, puis arrêt automatique |
+| Taille des ordres | 3 € à 9 € (cible 6 €) |
+| Stop loss | **−2 %** sous le prix d'entrée, obligatoire |
+| Take profit | **+4 %** |
+| Quantité minimale | BTC 0,0001 · ETH 0,001 |
+| Pertes | 3 €/jour → blocage · 6 €/semaine et 15 €/mois → pause |
+| Coûts | frais 0,1 % + écart achat/vente 0,1 % |
+
+Chaque jour, pour chaque actif détenu, le bot vérifie dans cet ordre : stop
+loss, puis take profit, puis croisement baissier. Sans position, il n'entre que
+sur croisement haussier. Le prix d'entrée moyen est mémorisé en base, ce qui
+rend le stop loss et le take profit possibles.
+
+Si la quantité minimale coûte plus que le plafond par ordre, l'ordre est
+**refusé avec son motif** plutôt qu'exécuté dans une taille irréaliste.
+
+La page `/bot-regles` affiche les comptes rendus, les positions avec leurs
+seuils de sortie, et un graphique comparant le bot, le témoin « acheter et
+garder » et ton portefeuille manuel — ce dernier n'étant pas encore suivi jour
+par jour, sa courbe reste vide.
+
 ### ⚠️ Aucun courtier réel
 
 Toute exécution passe par l'interface `Courtier` (`lib/broker/`). Une seule
@@ -179,11 +210,14 @@ app/
   bot/                Réglages et exécution du bot
   diagnostic/         Vérification base + prix, à ouvrir après déploiement
   claude-trader/      Comptes rendus quotidiens et bouton de pause
+  bot-regles/         Comptes rendus du bot mécanique et bouton de pause
   api/cron/           Tâche quotidienne (protégée par CRON_SECRET)
 lib/
   db.ts               Base PostgreSQL (schéma, migration, transactions)
   broker/             Interface courtier — simulation uniquement
   claude-trader/      Décision, validation, limites de perte, compte rendu
+  bot-regles/         Bot mécanique : décision, courtier simulé, compte rendu
+  limites.ts          Limites de perte et découpage du temps, partagés
   session.ts          Mot de passe unique et jeton de session signé
   acces.ts            Ouverture et fermeture de session (cookie)
   health.ts           Contrôles affichés sur /diagnostic
@@ -197,6 +231,7 @@ tests/engine.test.ts  Tests du moteur (anti-triche, frais, calculs)
 tests/session.test.ts Tests du mot de passe et des jetons de session
 tests/market.test.ts  Tests de la bascule entre sources et des analyseurs
 tests/claude-trader.test.ts  Tests des limites de perte et du cadre des ordres
+tests/bot-regles.test.ts     Tests du bot mécanique : stop loss, take profit, quantités
 tests/db.test.ts      Tests SQL contre un vrai PostgreSQL en mémoire
 tests/pg-local.mjs    Serveur PostgreSQL local pour le développement
 ```
@@ -260,7 +295,17 @@ Ce mot de passe n'est écrit nulle part dans le code ni sur GitHub : il ne vit
 que dans Vercel. Si tu le changes, tu seras déconnecté et devras ressaisir le
 nouveau.
 
-### Étape 5 — Activer le mode « Claude trader » (facultatif)
+### Étape 5 — Activer les modes automatiques (facultatif)
+
+Deux tâches quotidiennes sont déclarées dans `vercel.json` et créées par Vercel
+au premier déploiement :
+
+| Tâche | Heure | Coût |
+|---|---|---|
+| Bot à règles fixes | 18 h 30 UTC | **gratuit**, aucun appel d'API |
+| Mode Claude trader | 18 h 00 UTC | consomme des crédits Anthropic |
+
+
 
 Dans **Settings → Environment Variables**, ajoute :
 
@@ -269,12 +314,12 @@ Dans **Settings → Environment Variables**, ajoute :
 | `ANTHROPIC_API_KEY` | ta clé, créée sur **console.anthropic.com** → *API keys* |
 | `CRON_SECRET` | une longue phrase aléatoire de ton choix |
 
-Coche les trois environnements, puis **Save**. Sans `ANTHROPIC_API_KEY`, le reste
-du site fonctionne normalement : la tâche quotidienne se contente de noter qu'elle
-n'a pas pu décider, et ne passe aucun ordre.
+Coche les trois environnements, puis **Save**.
 
-La tâche est déclarée dans `vercel.json` et s'exécute chaque jour à 18 h UTC.
-Vercel la crée automatiquement au premier déploiement.
+`CRON_SECRET` protège **les deux** tâches : il est obligatoire pour que le bot à
+règles fixes fonctionne. `ANTHROPIC_API_KEY` n'est utile qu'au mode Claude
+trader — sans elle, **le bot à règles fixes tourne quand même**, et le mode
+Claude se contente de noter qu'il n'a pas pu décider, sans passer d'ordre.
 
 ### Étape 6 — Brancher la base de données gratuite
 

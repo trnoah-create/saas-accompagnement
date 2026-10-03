@@ -21,7 +21,7 @@ import {
   evaluerLimites,
   jourLocal,
   type Pertes,
-} from "./limites";
+} from "../limites";
 
 export type Statut =
   | "ordres"
