@@ -1,19 +1,21 @@
 /**
- * Limites de perte — appliquées par le code, jamais par le modèle.
+ * Limites de perte — écrites dans la configuration, appliquées par le code.
  *
  * Fonctions pures : aucune base, aucun réseau, tout est testable.
  * Les pertes sont exprimées en EUROS, pas en pourcentage, et les journées
  * sont découpées de minuit à minuit à l'heure configurée (Paris).
  */
-import { claudeTraderConfig } from "../config/claude-trader";
 import { euro as euros } from "./format";
+
+/** Fuseau par défaut pour découper les journées. */
+export const FUSEAU_PAR_DEFAUT = "Europe/Paris";
 
 // ─── Découpage du temps ──────────────────────────────────────────────
 
 /** Date du jour au format AAAA-MM-JJ, dans le fuseau configuré. */
 export function jourLocal(
   instant: Date = new Date(),
-  fuseau: string = claudeTraderConfig.fuseau,
+  fuseau: string = FUSEAU_PAR_DEFAUT,
 ): string {
   // en-CA produit directement AAAA-MM-JJ.
   return new Intl.DateTimeFormat("en-CA", {
@@ -100,7 +102,7 @@ export type SeuilsPertes = {
 export function evaluerLimites(
   valeurActuelle: number,
   ouvertures: Ouvertures,
-  config: SeuilsPertes = claudeTraderConfig,
+  config: SeuilsPertes,
 ): Decision {
   const pertes: Pertes = {
     jour: perte(valeurActuelle, ouvertures.jour),

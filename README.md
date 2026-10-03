@@ -1,7 +1,8 @@
 # SimuTrade
 
 Simulateur de trading à **argent 100 % fictif**. Portefeuille virtuel, backtests de
-stratégies et bot automatique sur Bitcoin, Ethereum, Dogecoin et le S&P 500.
+stratégies et bot automatique sur Bitcoin, Ethereum, Solana, le S&P 500 et le
+Nasdaq 100.
 
 > ⚠️ **Simulation, pas un conseil financier. Les performances passées ne garantissent rien.**
 > Aucun courtier n'est contacté, aucun ordre réel n'est passé, aucune donnée bancaire
@@ -35,8 +36,20 @@ première qui répond est retenue.
 
 | Actif | 1ʳᵉ source | 2ᵉ | 3ᵉ | 4ᵉ |
 |---|---|---|---|---|
-| Bitcoin, Ethereum, Dogecoin | Binance | Coinbase Exchange | Kraken | CoinGecko |
-| S&P 500 | Stooq | Yahoo Finance | FRED (indice) | — |
+| Bitcoin, Ethereum | Binance | Coinbase Exchange | Kraken | CoinGecko |
+| Solana (paire **SOL-EUR**) | Coinbase Exchange | Binance | Kraken | CoinGecko |
+| S&P 500, Nasdaq 100 | Stooq | Yahoo Finance | FRED (indice) | — |
+
+Solana remonte Coinbase en tête parce que c'est la seule source qui donne
+directement une paire en **euros** ; l'ordre de secours habituel est conservé
+derrière. Les autres actifs sont cotés en dollars et affichés tels quels.
+
+**Au moins un an d'historique par actif.** Chaque actif est téléchargé sur
+400 journées cotées. Une source qui renvoie moins de 250 journées est écartée
+au profit de la suivante ; si aucune n'atteint ce seuil, la plus fournie est
+gardée et la page `/diagnostic` le signale en rouge. Coinbase plafonnant à
+300 bougies par appel, son historique est récupéré en plusieurs appels puis
+fusionné.
 
 Pourquoi plusieurs : Binance restreint l'accès depuis certains pays, et les
 serveurs de Vercel sont majoritairement aux États-Unis. Coinbase et Kraken
@@ -102,76 +115,67 @@ Trois tests le vérifient (`npm test`), dont celui-ci : deux séries identiques 
 un jour donné puis radicalement différentes doivent produire **exactement les mêmes
 ordres** avant le point de divergence.
 
-### Mode « Claude trader »
+### Le bot automatique — sans aucun coût
 
-Un portefeuille fictif **distinct du tien**, doté de **100 €**, piloté chaque jour
-par le modèle — mais encadré par des règles que le code applique lui-même.
+Un portefeuille fictif **distinct du tien**, doté de **100 €**, piloté par des
+règles mécaniques. **Aucun appel à une intelligence artificielle, aucune API
+payante, aucune clé** : son coût de fonctionnement est nul.
 
 Tous les réglages sont dans un seul fichier :
-[`config/claude-trader.ts`](config/claude-trader.ts).
+[`config/bot-regles.ts`](config/bot-regles.ts).
 
-**Le cadre, appliqué par le code et jamais par le modèle :**
+**La règle, en une phrase :** le bot achète un actif dont le prix clôture
+**au-dessus de sa moyenne des 50 derniers jours**, et le vend dès qu'il
+**repasse en dessous**.
 
 | Règle | Valeur |
 |---|---|
-| Perte sur une journée | alerte à 2 €, **blocage à 3 €** |
+| Signal | prix contre sa **moyenne mobile 50 jours** |
+| Actifs | Bitcoin, Ethereum, S&P 500 (SPY), Nasdaq 100 (QQQ), Solana |
+| Part maximale par actif | **25 %** du portefeuille — **10 % pour Solana** |
+| Stop loss | **−5 %** sous le prix d'entrée, obligatoire |
+| Perte sur une journée | alerte à 1 €, **arrêt de la journée à 3 €** |
 | Perte sur une semaine | 6 € → mise en pause |
 | Perte sur un mois | 15 € → mise en pause |
-| Montant par ordre | 1 € à 5 € |
-| Ordres par jour | 3 au maximum |
-| Part d'un seul actif | 40 % du portefeuille |
-| Actifs autorisés | Bitcoin, Ethereum, Dogecoin, S&P 500 |
+| Ordres par jour | 5 au maximum, 2 € minimum par ordre |
 | Effet de levier, vente à découvert | interdits |
 | Coûts simulés | frais 0,1 % + écart achat/vente 0,1 % |
 
+Ces montants sont écrits **dans le code**, pas dans une variable
+d'environnement : aucun réglage oublié dans Vercel ne peut les desserrer.
+
 Les journées vont de minuit à minuit **heure de Paris**, et les pertes se
-comptent en **euros**, pas en pourcentage. Après un blocage quotidien, le mode
+comptent en **euros**, pas en pourcentage. Après un arrêt quotidien, le bot
 reprend le lendemain ; après une pause hebdomadaire ou mensuelle, il attend une
 **réactivation manuelle** via le bouton de la page.
 
 **Le déroulé de chaque journée**
 
-1. La tâche planifiée récupère les prix, l'historique récent et l'état du
-   portefeuille.
-2. Elle appelle l'API Anthropic avec la stratégie, le cadre, les prix, le
-   portefeuille et **les sept derniers comptes rendus** — le modèle n'a aucune
-   mémoire d'un jour à l'autre, tout lui est redonné.
-3. Le code **valide** chaque ordre contre le cadre et refuse ceux qui le
-   dépassent, même proposés par le modèle, puis exécute le reste.
-4. Un compte rendu est écrit : ordres passés et pourquoi, **ordres refusés et
-   pour quelle raison**, valeur du portefeuille, gain du jour, comparaison avec
-   un témoin « acheter et garder » lancé le même jour avec 100 €.
+1. La tâche planifiée (protégée par `CRON_SECRET`) récupère les prix et au
+   moins un an d'historique par actif.
+2. Elle calcule la limite de perte du jour. Si elle est atteinte, **tout
+   s'arrête jusqu'au lendemain** et le compte rendu le dit.
+3. Pour chaque actif détenu, elle vérifie dans cet ordre : **stop loss**, puis
+   **passage sous la moyenne mobile**. Sans position, elle n'entre que si le
+   prix est **au-dessus** de sa moyenne.
+4. Les ordres sont exécutés par le **courtier simulé**, puis un compte rendu
+   est écrit : ordres passés et pourquoi, ordres refusés et pour quelle raison,
+   valeur du portefeuille, gain du jour, comparaison avec un témoin « acheter
+   et garder ».
 
-« Ne rien faire » est une réponse valide, explicitement encouragée dans la
-consigne : sur un portefeuille de 100 €, les frais et l'écart achat/vente
-pénalisent l'agitation.
+**Désactiver un actif** (par exemple Solana) : passer `actif: false` sur sa
+ligne dans `config/bot-regles.ts`. Le bot cesse immédiatement d'en acheter ;
+une position déjà ouverte reste gérée, stop loss compris, jusqu'à sa fermeture.
 
-**Si l'appel échoue ou si la réponse ne respecte pas le format imposé, aucun
-ordre n'est passé** et la raison figure dans le compte rendu. Un bouton met le
-mode en pause à tout moment.
-
-### Bot à règles fixes — sans aucun coût
-
-Un troisième portefeuille fictif de **100 €**, piloté par des règles
-mécaniques. **Aucun appel à une API payante** : son coût de fonctionnement est
-nul. Réglages dans [`config/bot-regles.ts`](config/bot-regles.ts).
-
-| Règle | Valeur |
-|---|---|
-| Stratégie | croisement de moyennes mobiles **20 / 50 jours** |
-| Actifs | Bitcoin, Ethereum |
-| Durée de l'expérience | **60 jours**, puis arrêt automatique |
-| Taille des ordres | 3 € à 9 € (cible 6 €) |
-| Stop loss | **−2 %** sous le prix d'entrée, obligatoire |
-| Take profit | **+4 %** |
-| Quantité minimale | BTC 0,0001 · ETH 0,001 |
-| Pertes | 3 €/jour → blocage · 6 €/semaine et 15 €/mois → pause |
-| Coûts | frais 0,1 % + écart achat/vente 0,1 % |
-
-Chaque jour, pour chaque actif détenu, le bot vérifie dans cet ordre : stop
-loss, puis take profit, puis croisement baissier. Sans position, il n'entre que
-sur croisement haussier. Le prix d'entrée moyen est mémorisé en base, ce qui
-rend le stop loss et le take profit possibles.
+**Les règles ne sont pas mélangées au courtier.** `lib/bot-regles/decider.ts`
+est une fonction pure : elle reçoit des chiffres et renvoie des intentions
+d'ordres, sans connaître ni base de données, ni réseau, ni courtier. Le
+courtier, lui, n'expose que quatre opérations
+(`acheter` · `vendre` · `solde` · `positions`) décrites dans
+[`lib/broker/types.ts`](lib/broker/types.ts). Brancher un vrai courtier plus
+tard consisterait à écrire une nouvelle implémentation de ces quatre méthodes,
+**sans toucher à une seule règle**. Un test vérifie cette frontière en
+inspectant les imports du fichier de règles.
 
 Si la quantité minimale coûte plus que le plafond par ordre, l'ordre est
 **refusé avec son motif** plutôt qu'exécuté dans une taille irréaliste.
@@ -209,14 +213,13 @@ app/
   comparateur/        Tous les actifs × toutes les stratégies
   bot/                Réglages et exécution du bot
   diagnostic/         Vérification base + prix, à ouvrir après déploiement
-  claude-trader/      Comptes rendus quotidiens et bouton de pause
-  bot-regles/         Comptes rendus du bot mécanique et bouton de pause
+  bot-regles/         Comptes rendus du bot automatique et bouton de pause
   api/cron/           Tâche quotidienne (protégée par CRON_SECRET)
 lib/
   db.ts               Base PostgreSQL (schéma, migration, transactions)
-  broker/             Interface courtier — simulation uniquement
-  claude-trader/      Décision, validation, limites de perte, compte rendu
-  bot-regles/         Bot mécanique : décision, courtier simulé, compte rendu
+  broker/             Interface courtier (acheter/vendre/solde/positions)
+                      — simulation uniquement
+  bot-regles/         Règles pures (decider.ts) et exécution du jour (run.ts)
   limites.ts          Limites de perte et découpage du temps, partagés
   session.ts          Mot de passe unique et jeton de session signé
   acces.ts            Ouverture et fermeture de session (cookie)
@@ -230,8 +233,8 @@ lib/
 tests/engine.test.ts  Tests du moteur (anti-triche, frais, calculs)
 tests/session.test.ts Tests du mot de passe et des jetons de session
 tests/market.test.ts  Tests de la bascule entre sources et des analyseurs
-tests/claude-trader.test.ts  Tests des limites de perte et du cadre des ordres
-tests/bot-regles.test.ts     Tests du bot mécanique : stop loss, take profit, quantités
+tests/bot-regles.test.ts     Tests du bot : moyenne mobile, stop loss, plafonds,
+                             limites de perte, séparation règles/courtier
 tests/db.test.ts      Tests SQL contre un vrai PostgreSQL en mémoire
 tests/pg-local.mjs    Serveur PostgreSQL local pour le développement
 ```
@@ -295,31 +298,27 @@ Ce mot de passe n'est écrit nulle part dans le code ni sur GitHub : il ne vit
 que dans Vercel. Si tu le changes, tu seras déconnecté et devras ressaisir le
 nouveau.
 
-### Étape 5 — Activer les modes automatiques (facultatif)
+### Étape 5 — Activer le bot automatique
 
-Deux tâches quotidiennes sont déclarées dans `vercel.json` et créées par Vercel
-au premier déploiement :
+Une tâche quotidienne est déclarée dans `vercel.json` et créée par Vercel au
+premier déploiement :
 
 | Tâche | Heure | Coût |
 |---|---|---|
-| Bot à règles fixes | 18 h 30 UTC | **gratuit**, aucun appel d'API |
-| Mode Claude trader | 18 h 00 UTC | consomme des crédits Anthropic |
-
-
+| Bot automatique | 18 h 30 UTC | **gratuit** — aucun appel d'API, aucune clé |
 
 Dans **Settings → Environment Variables**, ajoute :
 
 | Key | Value |
 |---|---|
-| `ANTHROPIC_API_KEY` | ta clé, créée sur **console.anthropic.com** → *API keys* |
 | `CRON_SECRET` | une longue phrase aléatoire de ton choix |
 
 Coche les trois environnements, puis **Save**.
 
-`CRON_SECRET` protège **les deux** tâches : il est obligatoire pour que le bot à
-règles fixes fonctionne. `ANTHROPIC_API_KEY` n'est utile qu'au mode Claude
-trader — sans elle, **le bot à règles fixes tourne quand même**, et le mode
-Claude se contente de noter qu'il n'a pas pu décider, sans passer d'ordre.
+`CRON_SECRET` protège l'adresse de la tâche : une tâche planifiée ne peut pas
+saisir le mot de passe du site, c'est donc ce secret qui tient la porte. **Sans
+lui, l'adresse reste fermée et le bot ne tourne pas.** Aucune autre clé n'est
+nécessaire : le bot ne contacte aucun service payant.
 
 ### Étape 6 — Brancher la base de données gratuite
 
@@ -343,20 +342,27 @@ Ouvre **`https://ton-site.vercel.app/diagnostic`** sur ton téléphone.
 Le mot de passe te sera demandé. Cette page te dit ensuite en clair :
 
 - ✅ **Mot de passe du site : configuré** → le site est bien protégé ;
-- ✅ **Mode Claude trader** → clé d'API et secret de la tâche présents ;
 - ✅ **Base de données : connectée** → les comptes seront bien enregistrés ;
-- ✅ **Prix de marché : les 4 actifs reçoivent de vrais prix** → Binance et
-  Stooq répondent correctement.
+- ✅ **Prix de marché : les 5 actifs reçoivent de vrais prix** → au moins une
+  source répond pour chacun ;
+- ✅ **Historique : au moins un an de cotations pour chaque actif** → le bot
+  peut calculer sa moyenne 50 jours ;
+- ✅ **Tâche quotidienne : `CRON_SECRET` défini** → le bot peut s'exécuter.
 
-Si les deux lignes sont vertes, c'est terminé : crée ton compte et tu reçois
-tes 1 000 € fictifs.
+Un bloc **Bot automatique** affiche en plus sa **dernière exécution**, le
+**nombre d'ordres passés** et son dernier compte rendu.
+
+Si toutes les lignes sont vertes, c'est terminé.
 
 ### Si quelque chose cloche
 
 | Ce que tu vois | Ce qu'il faut faire |
 |---|---|
-| « Site pas encore configuré » sur la page d'accès | `SITE_PASSWORD` manque (étape 4), ou tu n'as pas redéployé (étape 6). |
-| « Base de données : pas encore connectée » | L'étape 4 n'a pas abouti, ou tu n'as pas redéployé (étape 5). |
+| « Site pas encore configuré » sur la page d'accès | `SITE_PASSWORD` manque (étape 4), ou tu n'as pas redéployé (étape 7). |
+| « Base de données : pas encore connectée » | L'étape 6 n'a pas abouti, ou tu n'as pas redéployé (étape 7). |
+| « `CRON_SECRET` manquant » | Étape 5 : sans ce secret, le bot ne s'exécute pas. |
+| « Historique : moins d'un an » sur un actif | Aucune source n'a renvoyé assez de journées. `/diagnostic` indique laquelle a répondu et combien de journées elle a fournies. Le bot attend d'avoir 50 journées closes avant de décider quoi que ce soit. |
+| « Bot automatique : jamais exécuté » | La tâche n'a pas encore tourné. Vercel → **Settings → Cron Jobs** permet de la déclencher à la main. |
 | « Base configurée mais injoignable » | La base Neon est peut-être en veille : recharge la page une fois. |
 | « Démonstration » sur les prix | Les prix affichés sont **inventés**. Ouvre `/diagnostic` : chaque source essayée y est listée avec la cause exacte de son échec (code HTTP, message, délai dépassé). |
 | Page blanche ou erreur 500 | Vercel → **Deployments** → clique le déploiement → **Runtime Logs** pour voir le message. |

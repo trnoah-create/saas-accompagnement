@@ -1,18 +1,26 @@
 /**
- * Décisions du bot à règles fixes.
+ * Les RÈGLES du bot — et seulement les règles.
  *
- * Fonction pure : aucune base, aucun réseau, aucun appel payant. Tout est
- * mécanique, donc entièrement testable.
+ * Fonction pure : aucune base, aucun réseau, aucun courtier, aucun appel
+ * payant. On lui donne l'état du portefeuille, les historiques de prix et
+ * les prix du jour ; elle renvoie la liste des ordres SOUHAITÉS. C'est
+ * l'orchestration (run.ts) qui les fait exécuter par le courtier.
  *
- * Ordre des règles pour chaque actif détenu :
- *   1. stop loss   — vente obligatoire si le prix casse le seuil bas ;
- *   2. take profit — vente si l'objectif de gain est atteint ;
- *   3. croisement  — vente si la moyenne courte repasse sous la longue.
- * Puis, pour les actifs non détenus : achat si la moyenne courte est
- * au-dessus de la longue.
+ * Cette séparation est volontaire : les règles ci-dessous n'ont aucune
+ * idée de l'existence d'un courtier, simulé ou réel.
+ *
+ * La règle, en clair :
+ *   • le prix clôture AU-DESSUS de sa moyenne des 50 derniers jours → achat ;
+ *   • il clôture EN DESSOUS → vente de la position ;
+ *   • une position qui perd plus que le stop loss est vendue d'office,
+ *     même si la moyenne mobile est toujours favorable.
+ *
+ * Ordre des vérifications pour un actif détenu :
+ *   1. stop loss ;
+ *   2. passage sous la moyenne mobile.
  */
-import { botReglesConfig, fraisBot, prixAchatBot, prixVenteBot } from "../../config/bot-regles";
-import { decide } from "../engine/strategies";
+import { botReglesConfig } from "../../config/bot-regles";
+import { sma } from "../engine/strategies";
 import type { Bar } from "../market/types";
 
 export type PositionBot = {
@@ -39,6 +47,8 @@ export type RefusBot = {
 
 export type EtatBot = {
   cash: number;
+  /** cash + valeur des positions : base du calcul des plafonds. */
+  valeurTotale: number;
   positions: PositionBot[];
 };
 
@@ -54,21 +64,48 @@ export type Plan = { ordres: OrdreBot[]; refus: RefusBot[]; signaux: Record<stri
  * volontairement souple : on doit pouvoir passer une variante en test.
  */
 export type ReglesBot = {
-  readonly actifs: readonly string[];
-  readonly strategie: { readonly courte: number; readonly longue: number };
-  readonly ordres: {
-    readonly cible: number;
-    readonly minEuros: number;
-    readonly maxEuros: number;
-    readonly maxParJour: number;
-  };
+  readonly actifs: readonly {
+    readonly id: string;
+    readonly poidsMaxPct: number;
+    readonly actif: boolean;
+  }[];
+  readonly moyenneMobileJours: number;
+  readonly ordres: { readonly minEuros: number; readonly maxParJour: number };
   readonly quantiteMinimale: Readonly<Record<string, number>>;
-  readonly sorties: { readonly stopLossPct: number; readonly takeProfitPct: number };
+  readonly sorties: { readonly stopLossPct: number };
   readonly couts: { readonly fraisPct: number; readonly ecartPct: number };
 };
 
 const euros = (n: number) => `${n.toFixed(2)} €`;
 const pct = (n: number) => `${n.toFixed(2)} %`;
+
+/** Coûts calculés à partir de la configuration reçue, jamais d'une globale. */
+function couts(config: ReglesBot) {
+  return {
+    achat: (p: number) => p * (1 + config.couts.ecartPct / 100 / 2),
+    vente: (p: number) => p * (1 - config.couts.ecartPct / 100 / 2),
+    frais: (m: number) => m * (config.couts.fraisPct / 100),
+  };
+}
+
+/**
+ * Signal d'un actif : sa dernière clôture connue face à sa moyenne mobile.
+ *
+ * ⚠️ Règle anti-triche : `bars` contient la journée en cours, on la retire.
+ * La décision ne s'appuie donc que sur des journées déjà terminées, jamais
+ * sur un prix que le bot n'aurait pas pu connaître.
+ */
+export function signalMoyenneMobile(
+  bars: Bar[],
+  jours: number,
+): { position: "au-dessus" | "en-dessous"; moyenne: number; cloture: number } | null {
+  const historique = bars.slice(0, -1);
+  const closes = historique.map((b) => b.close);
+  const moyenne = sma(closes, jours);
+  const cloture = closes.at(-1);
+  if (moyenne === null || cloture === undefined) return null;
+  return { position: cloture > moyenne ? "au-dessus" : "en-dessous", moyenne, cloture };
+}
 
 export function deciderOrdres(
   etat: EtatBot,
@@ -79,11 +116,27 @@ export function deciderOrdres(
   const ordres: OrdreBot[] = [];
   const refus: RefusBot[] = [];
   const signaux: Record<string, string> = {};
+  const { achat, vente, frais } = couts(config);
 
   let cash = etat.cash;
   const positions = new Map(etat.positions.map((p) => [p.asset, p]));
+  const jours = config.moyenneMobileJours;
 
-  for (const actif of config.actifs) {
+  // La valeur totale sert de référence aux plafonds. Elle est figée au
+  // début de la journée : les plafonds ne bougent pas au fil des ordres.
+  const valeurTotale = etat.valeurTotale;
+
+  // Actifs à examiner : ceux de la configuration, PLUS ceux qu'on détient
+  // encore sans qu'ils y figurent (actif retiré de la liste). Sans cela,
+  // une position orpheline ne serait plus jamais revendue.
+  const aExaminer: ReglesBot["actifs"][number][] = [...config.actifs];
+  for (const p of etat.positions) {
+    if (aExaminer.some((a) => a.id === p.asset)) continue;
+    aExaminer.push({ id: p.asset, poidsMaxPct: 0, actif: false });
+  }
+
+  for (const reglage of aExaminer) {
+    const actif = reglage.id;
     const bars = historiques[actif];
     const p = prix[actif];
 
@@ -92,33 +145,32 @@ export function deciderOrdres(
       continue;
     }
 
-    // Anti-triche : la décision n'utilise que les journées déjà closes.
-    const historique = bars.slice(0, -1);
-    const voulu = decide("sma_cross", historique, {
-      fast: config.strategie.courte,
-      slow: config.strategie.longue,
-    });
-
+    const signal = signalMoyenneMobile(bars, jours);
     const position = positions.get(actif);
 
+    if (!signal) {
+      signaux[actif] =
+        `historique trop court : ${Math.max(bars.length - 1, 0)} journées closes, ` +
+        `il en faut ${jours} pour la moyenne mobile`;
+      continue;
+    }
+
+    // ── Actif détenu : stop loss, puis moyenne mobile ──
     if (position && position.quantity > 0) {
       const variation = ((p - position.prixEntree) / position.prixEntree) * 100;
       const seuilStop = -config.sorties.stopLossPct;
-      const seuilGain = config.sorties.takeProfitPct;
 
       let raison: string | null = null;
       if (variation <= seuilStop) {
         raison = `Stop loss : ${pct(variation)} depuis l'achat, sous le seuil de ${pct(seuilStop)}.`;
-      } else if (variation >= seuilGain) {
-        raison = `Take profit : ${pct(variation)} depuis l'achat, objectif de ${pct(seuilGain)} atteint.`;
-      } else if (voulu === "flat") {
-        raison = `Croisement baissier : la moyenne ${config.strategie.courte} jours est repassée sous la moyenne ${config.strategie.longue} jours.`;
+      } else if (signal.position === "en-dessous") {
+        raison = `Le prix (${signal.cloture.toFixed(2)}) est repassé sous sa moyenne ${jours} jours (${signal.moyenne.toFixed(2)}).`;
       }
 
-      signaux[actif] = raison ?? `Conservé (${pct(variation)} depuis l'achat).`;
+      signaux[actif] = raison ?? `Conservé : prix au-dessus de sa moyenne ${jours} jours (${pct(variation)} depuis l'achat).`;
 
       if (raison) {
-        const montant = position.quantity * prixVenteBot(p);
+        const montant = position.quantity * vente(p);
         if (ordres.length >= config.ordres.maxParJour) {
           refus.push({
             asset: actif,
@@ -129,64 +181,74 @@ export function deciderOrdres(
           });
         } else {
           ordres.push({ asset: actif, side: "sell", montant, raison });
-          cash += montant - fraisBot(montant);
+          cash += montant - frais(montant);
           positions.delete(actif);
         }
       }
       continue;
     }
 
-    // Pas de position : on n'entre que sur signal haussier.
-    if (voulu !== "long") {
-      signaux[actif] = `Hors marché : la moyenne ${config.strategie.courte} jours reste sous la moyenne ${config.strategie.longue} jours.`;
+    // ── Actif non détenu ──
+
+    // Un actif désactivé n'est plus acheté. Une position déjà ouverte
+    // continue d'être gérée (cas traité juste au-dessus).
+    if (!reglage.actif) {
+      signaux[actif] = "actif désactivé dans la configuration : aucun achat.";
       continue;
     }
 
-    signaux[actif] = `Croisement haussier : entrée possible.`;
-    const raison = `Croisement haussier : la moyenne ${config.strategie.courte} jours est passée au-dessus de la moyenne ${config.strategie.longue} jours.`;
+    // Un actif dont le plafond est nul ne peut rien recevoir.
+    if (reglage.poidsMaxPct <= 0) {
+      signaux[actif] = "plafond de 0 % : aucun achat possible.";
+      continue;
+    }
+
+    if (signal.position !== "au-dessus") {
+      signaux[actif] = `Hors marché : le prix (${signal.cloture.toFixed(2)}) reste sous sa moyenne ${jours} jours (${signal.moyenne.toFixed(2)}).`;
+      continue;
+    }
+
+    const raison = `Le prix (${signal.cloture.toFixed(2)}) est passé au-dessus de sa moyenne ${jours} jours (${signal.moyenne.toFixed(2)}).`;
+    signaux[actif] = `Signal d'achat : prix au-dessus de sa moyenne ${jours} jours.`;
 
     if (ordres.length >= config.ordres.maxParJour) {
       refus.push({
         asset: actif,
         side: "buy",
-        montant: config.ordres.cible,
+        montant: 0,
         raison,
         motifRefus: `Plafond de ${config.ordres.maxParJour} ordres par jour atteint.`,
       });
       continue;
     }
 
-    const prixAchat = prixAchatBot(p);
+    // Plafond de concentration : au maximum X % du portefeuille sur cet actif.
+    const plafond = valeurTotale * (reglage.poidsMaxPct / 100);
+    const prixAchat = achat(p);
     const qteMin = config.quantiteMinimale[actif] ?? 0;
-    // Montant minimal permettant d'atteindre la quantité négociable.
     const montantPourQteMin = qteMin * prixAchat;
 
-    if (montantPourQteMin > config.ordres.maxEuros + 1e-9) {
+    if (montantPourQteMin > plafond + 1e-9) {
       refus.push({
         asset: actif,
         side: "buy",
         montant: montantPourQteMin,
         raison,
-        motifRefus: `Quantité minimale de ${qteMin} ${actif} = ${euros(montantPourQteMin)}, au-dessus du plafond de ${euros(config.ordres.maxEuros)} par ordre.`,
+        motifRefus: `Quantité minimale de ${qteMin} ${actif} = ${euros(montantPourQteMin)}, au-dessus du plafond de ${reglage.poidsMaxPct} % (${euros(plafond)}).`,
       });
       continue;
     }
 
-    // On vise la cible, relevée si besoin pour atteindre la quantité minimale.
-    let montant = Math.max(config.ordres.cible, montantPourQteMin);
-    montant = Math.min(montant, config.ordres.maxEuros);
-
-    const coutMax = montant + fraisBot(montant);
-    if (coutMax > cash + 1e-9) {
-      // On réduit à ce que le liquide permet, frais compris.
-      montant = cash / (1 + config.couts.fraisPct / 100);
-    }
+    // On vise le plafond, borné par le liquide disponible frais compris.
+    let montant = plafond;
+    const coutMax = montant + frais(montant);
+    if (coutMax > cash + 1e-9) montant = cash / (1 + config.couts.fraisPct / 100);
 
     if (montant < config.ordres.minEuros - 1e-9) {
       refus.push({
         asset: actif,
         side: "buy",
-        montant,
+        montant: Math.max(montant, 0),
         raison,
         motifRefus: `Montant possible de ${euros(Math.max(montant, 0))}, en dessous du minimum de ${euros(config.ordres.minEuros)}.`,
       });
@@ -205,7 +267,7 @@ export function deciderOrdres(
     }
 
     ordres.push({ asset: actif, side: "buy", montant, raison });
-    cash -= montant + fraisBot(montant);
+    cash -= montant + frais(montant);
     positions.set(actif, { asset: actif, quantity: montant / prixAchat, prixEntree: prixAchat });
   }
 

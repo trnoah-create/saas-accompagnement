@@ -1,130 +1,192 @@
 /**
- * Courtier simulé — la SEULE implémentation existante.
+ * Courtier simulé — la SEULE implémentation existante de l'interface.
  *
- * Tout est fictif : aucun appel vers un courtier, aucun identifiant, aucun
- * mouvement d'argent réel. Un ordre ne fait que modifier des lignes dans la
- * base du site. Les coûts (frais et écart achat/vente) viennent de
- * config/claude-trader.ts.
+ * ⚠️ Tout est fictif : aucun appel vers un courtier, aucun identifiant,
+ * aucune donnée bancaire, aucun mouvement d'argent réel. Un ordre ne fait
+ * que modifier des lignes dans la base du site.
+ *
+ * Le portefeuille du bot est entièrement séparé de ton portefeuille
+ * manuel (tables `bot_*` contre `owner_*`).
  */
 import "server-only";
 import { query, queryOne, transaction } from "../db";
-import { claudeTraderConfig, frais, prixAchat, prixVente } from "../../config/claude-trader";
+import {
+  botReglesConfig,
+  fraisBot,
+  prixAchatBot,
+  prixVenteBot,
+} from "../../config/bot-regles";
 import { getLastPrice, type AssetId } from "../market";
-import type { Courtier, EtatCompte, OrdreDemande, OrdreExecute } from "./types";
+import type {
+  Courtier,
+  OrdreDemande,
+  OrdreExecute,
+  PositionCourtier,
+  Solde,
+} from "./types";
 
 async function assurerCompte(): Promise<void> {
   await query(
-    `INSERT INTO claude_portfolio (id, cash, start_capital) VALUES (1, $1, $1)
+    `INSERT INTO bot_portfolio (id, cash, start_capital) VALUES (1, $1, $1)
      ON CONFLICT (id) DO NOTHING`,
-    [claudeTraderConfig.capitalDepart],
+    [botReglesConfig.capitalDepart],
   );
+}
+
+/** Actifs sur lesquels le courtier accepte un ordre. */
+function actifConnu(id: string): boolean {
+  return botReglesConfig.actifs.some((a) => a.id === id);
 }
 
 export const courtierSimule: Courtier = {
   nom: "Simulation (argent fictif)",
   reel: false,
 
-  async etat(): Promise<EtatCompte> {
+  async solde(): Promise<Solde> {
     await assurerCompte();
 
-    const row = await queryOne<{ cash: number; start_capital: number }>(
-      "SELECT cash, start_capital FROM claude_portfolio WHERE id = 1",
+    const row = await queryOne<{ cash: number; start_capital: number; started_on: string }>(
+      `SELECT cash, start_capital, to_char(started_on, 'YYYY-MM-DD') AS started_on
+       FROM bot_portfolio WHERE id = 1`,
     );
-    if (!row) throw new Error("Portefeuille Claude introuvable.");
+    if (!row) throw new Error("Portefeuille du bot introuvable.");
 
-    const detenu = await query<{ asset: string; quantity: number }>(
-      "SELECT asset, quantity FROM claude_positions WHERE quantity > 0",
-    );
-
-    const positions = [];
-    let investi = 0;
-    for (const h of detenu) {
-      const { price } = await getLastPrice(h.asset as AssetId);
-      const value = Number(h.quantity) * price;
-      investi += value;
-      positions.push({ asset: h.asset, quantity: Number(h.quantity), price, value });
-    }
-
-    const cash = Number(row.cash);
     return {
-      cash,
-      startCapital: Number(row.start_capital),
-      positions,
-      totalValue: cash + investi,
+      cash: Number(row.cash),
+      capitalDepart: Number(row.start_capital),
+      depuisLe: String(row.started_on),
     };
   },
 
-  async passerOrdre(ordre: OrdreDemande): Promise<OrdreExecute> {
-    if (!claudeTraderConfig.actifsAutorises.includes(ordre.asset as never)) {
-      throw new Error("Actif non autorisé.");
+  async positions(): Promise<PositionCourtier[]> {
+    await assurerCompte();
+
+    const detenu = await query<{ asset: string; quantity: number; prix_entree: number }>(
+      "SELECT asset, quantity, prix_entree FROM bot_positions WHERE quantity > 0 ORDER BY asset",
+    );
+
+    const positions: PositionCourtier[] = [];
+    for (const h of detenu) {
+      const { price } = await getLastPrice(h.asset as AssetId);
+      const quantity = Number(h.quantity);
+      positions.push({
+        asset: h.asset,
+        quantity,
+        prixEntree: Number(h.prix_entree),
+        prix: price,
+        valeur: quantity * price,
+      });
     }
-    if (!Number.isFinite(ordre.montant) || ordre.montant <= 0) {
-      throw new Error("Montant invalide.");
-    }
+    return positions;
+  },
+
+  async acheter(ordre: OrdreDemande): Promise<OrdreExecute> {
+    verifier(ordre);
 
     const { price: prixMarche } = await getLastPrice(ordre.asset as AssetId);
-    const fee = frais(ordre.montant);
+    const price = prixAchatBot(prixMarche);
+    const fee = fraisBot(ordre.montant);
+    const quantity = ordre.montant / price;
+    const cout = ordre.montant + fee;
 
-    if (ordre.side === "buy") {
-      // On achète un peu au-dessus du prix affiché.
-      const price = prixAchat(prixMarche);
-      const quantity = ordre.montant / price;
-      const cout = ordre.montant + fee;
+    const row = await queryOne<{ cash: number }>("SELECT cash FROM bot_portfolio WHERE id = 1");
+    if (!row || cout > Number(row.cash) + 1e-9) throw new Error("Liquidités insuffisantes.");
 
-      const row = await queryOne<{ cash: number }>(
-        "SELECT cash FROM claude_portfolio WHERE id = 1",
-      );
-      if (!row || cout > Number(row.cash) + 1e-9) {
-        throw new Error("Liquidités insuffisantes.");
-      }
-
-      await transaction([
-        { text: "UPDATE claude_portfolio SET cash = cash - $1 WHERE id = 1", params: [cout] },
-        {
-          text: `INSERT INTO claude_positions (asset, quantity) VALUES ($1, $2)
-                 ON CONFLICT (asset) DO UPDATE SET quantity = claude_positions.quantity + EXCLUDED.quantity`,
-          params: [ordre.asset, quantity],
-        },
-        {
-          text: `INSERT INTO claude_orders (asset, side, quantity, price, fee, reason)
-                 VALUES ($1, 'buy', $2, $3, $4, $5)`,
-          params: [ordre.asset, quantity, price, fee, ordre.reason],
-        },
-      ]);
-
-      return { ...ordre, side: "buy", quantity, price, prixMarche, fee };
+    const qteMin = botReglesConfig.quantiteMinimale[ordre.asset] ?? 0;
+    if (quantity < qteMin - 1e-12) {
+      throw new Error(`Quantité sous le minimum négociable (${qteMin} ${ordre.asset}).`);
     }
 
-    // Vente : on vend un peu en dessous du prix affiché.
-    const price = prixVente(prixMarche);
-    const quantity = ordre.montant / price;
-
-    const pos = await queryOne<{ quantity: number }>(
-      "SELECT quantity FROM claude_positions WHERE asset = $1",
+    // Prix d'entrée moyen pondéré : c'est la base du stop loss.
+    const existante = await queryOne<{ quantity: number; prix_entree: number }>(
+      "SELECT quantity, prix_entree FROM bot_positions WHERE asset = $1",
       [ordre.asset],
     );
-    const detenu = pos ? Number(pos.quantity) : 0;
-    // Pas de vente à découvert.
-    if (quantity > detenu + 1e-12) {
-      throw new Error("Quantité supérieure à la position détenue.");
-    }
+    const qAvant = existante ? Number(existante.quantity) : 0;
+    const pAvant = existante ? Number(existante.prix_entree) : 0;
+    const nouvelleQuantite = qAvant + quantity;
+    const nouveauPrixEntree =
+      nouvelleQuantite > 0 ? (qAvant * pAvant + quantity * price) / nouvelleQuantite : price;
 
     await transaction([
+      { text: "UPDATE bot_portfolio SET cash = cash - $1 WHERE id = 1", params: [cout] },
       {
-        text: "UPDATE claude_portfolio SET cash = cash + $1 WHERE id = 1",
-        params: [ordre.montant - fee],
+        text: `INSERT INTO bot_positions (asset, quantity, prix_entree) VALUES ($1, $2, $3)
+               ON CONFLICT (asset) DO UPDATE SET quantity = $2, prix_entree = $3`,
+        params: [ordre.asset, nouvelleQuantite, nouveauPrixEntree],
       },
       {
-        text: "UPDATE claude_positions SET quantity = quantity - $1 WHERE asset = $2",
-        params: [quantity, ordre.asset],
-      },
-      {
-        text: `INSERT INTO claude_orders (asset, side, quantity, price, fee, reason)
-               VALUES ($1, 'sell', $2, $3, $4, $5)`,
-        params: [ordre.asset, quantity, price, fee, ordre.reason],
+        text: `INSERT INTO bot_orders (asset, side, montant, quantity, price, fee, reason)
+               VALUES ($1, 'buy', $2, $3, $4, $5, $6)`,
+        params: [ordre.asset, ordre.montant, quantity, price, fee, ordre.raison],
       },
     ]);
 
-    return { ...ordre, side: "sell", quantity, price, prixMarche, fee };
+    return {
+      asset: ordre.asset,
+      side: "buy",
+      montant: ordre.montant,
+      quantity,
+      price,
+      prixMarche,
+      fee,
+      raison: ordre.raison,
+    };
+  },
+
+  async vendre(ordre: OrdreDemande): Promise<OrdreExecute> {
+    verifier(ordre);
+
+    const { price: prixMarche } = await getLastPrice(ordre.asset as AssetId);
+    const price = prixVenteBot(prixMarche);
+
+    const pos = await queryOne<{ quantity: number }>(
+      "SELECT quantity FROM bot_positions WHERE asset = $1",
+      [ordre.asset],
+    );
+    const detenu = pos ? Number(pos.quantity) : 0;
+    // Pas de vente à découvert : on ne vend jamais ce qu'on n'a pas.
+    if (detenu <= 0) throw new Error("Aucune position à vendre.");
+
+    const quantity = Math.min(ordre.montant / price, detenu);
+    const montantReel = quantity * price;
+    const fee = fraisBot(montantReel);
+    const reste = detenu - quantity;
+
+    await transaction([
+      {
+        text: "UPDATE bot_portfolio SET cash = cash + $1 WHERE id = 1",
+        params: [montantReel - fee],
+      },
+      reste > 1e-12
+        ? {
+            text: "UPDATE bot_positions SET quantity = $1 WHERE asset = $2",
+            params: [reste, ordre.asset],
+          }
+        : { text: "DELETE FROM bot_positions WHERE asset = $1", params: [ordre.asset] },
+      {
+        text: `INSERT INTO bot_orders (asset, side, montant, quantity, price, fee, reason)
+               VALUES ($1, 'sell', $2, $3, $4, $5, $6)`,
+        params: [ordre.asset, montantReel, quantity, price, fee, ordre.raison],
+      },
+    ]);
+
+    return {
+      asset: ordre.asset,
+      side: "sell",
+      montant: montantReel,
+      quantity,
+      price,
+      prixMarche,
+      fee,
+      raison: ordre.raison,
+    };
   },
 };
+
+function verifier(ordre: OrdreDemande): void {
+  if (!actifConnu(ordre.asset)) throw new Error("Actif hors périmètre du bot.");
+  if (!Number.isFinite(ordre.montant) || ordre.montant <= 0) {
+    throw new Error("Montant invalide.");
+  }
+}

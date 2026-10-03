@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
-import { etatBase, etatActifs, etatAcces, etatClaudeTrader } from "@/lib/health";
-import { prix } from "@/lib/format";
+import { etatBase, etatActifs, etatAcces, etatBotAuto } from "@/lib/health";
+import { euro, prix } from "@/lib/format";
 
 export const metadata: Metadata = { title: "Diagnostic", robots: { index: false } };
 export const dynamic = "force-dynamic";
@@ -22,12 +22,18 @@ function Pastille({ ok, texte }: { ok: boolean; texte: string }) {
 
 export default async function Page() {
   const acces = etatAcces();
-  const trader = etatClaudeTrader();
   const base = await etatBase();
+  const bot = base.joignable ? await etatBotAuto() : null;
   const actifs = await etatActifs();
 
   const prixReels = actifs.filter((a) => a.reel).length;
-  const toutVaBien = acces.configure && base.joignable && prixReels === actifs.length;
+  const assezDHistorique = actifs.filter((a) => a.unAnDHistorique).length;
+  const toutVaBien =
+    acces.configure &&
+    base.joignable &&
+    prixReels === actifs.length &&
+    assezDHistorique === actifs.length &&
+    Boolean(bot?.cronSecret);
 
   return (
     <div className="container-page py-10">
@@ -65,8 +71,20 @@ export default async function Page() {
           <li>
             {prixReels === actifs.length ? "✅" : "❌"} Prix de marché :{" "}
             {prixReels === actifs.length
-              ? "les 4 actifs reçoivent de vrais prix"
+              ? `les ${actifs.length} actifs reçoivent de vrais prix`
               : `seulement ${prixReels} actif(s) sur ${actifs.length} avec de vrais prix`}
+          </li>
+          <li>
+            {assezDHistorique === actifs.length ? "✅" : "❌"} Historique :{" "}
+            {assezDHistorique === actifs.length
+              ? "au moins un an de cotations pour chaque actif"
+              : `seulement ${assezDHistorique} actif(s) sur ${actifs.length} avec un an d'historique`}
+          </li>
+          <li>
+            {bot?.cronSecret ? "✅" : "❌"} Tâche quotidienne :{" "}
+            {bot?.cronSecret
+              ? "CRON_SECRET défini, le bot peut s'exécuter chaque jour"
+              : "CRON_SECRET manquant, la tâche quotidienne est fermée"}
           </li>
         </ul>
         {!toutVaBien && (
@@ -77,33 +95,76 @@ export default async function Page() {
         )}
       </div>
 
-      {/* Mode Claude trader */}
-      <h2 className="mt-10 text-xl font-bold">Mode Claude trader</h2>
-      <div className="mt-4 space-y-3 rounded-2xl border border-slate-200 p-5 dark:border-slate-800">
-        <div className="flex flex-wrap items-center gap-3">
-          <Pastille
-            ok={trader.cleApi}
-            texte={trader.cleApi ? "ANTHROPIC_API_KEY définie" : "ANTHROPIC_API_KEY absente"}
-          />
-          <Pastille
-            ok={trader.cronSecret}
-            texte={trader.cronSecret ? "CRON_SECRET défini" : "CRON_SECRET absent"}
-          />
-          <Pastille ok={!trader.courtierReel} texte={`Courtier : ${trader.courtierNom}`} />
+      {/* État du bot automatique */}
+      <h2 className="mt-10 text-xl font-bold">Bot automatique</h2>
+      {bot === null ? (
+        <p className="mt-4 rounded-2xl border border-slate-200 p-5 text-sm text-slate-600 dark:border-slate-800 dark:text-slate-400">
+          L&apos;état du bot ne peut pas être lu : la base de données est indisponible.
+        </p>
+      ) : (
+        <div className="mt-4 space-y-4 rounded-2xl border border-slate-200 p-5 dark:border-slate-800">
+          <div className="flex flex-wrap items-center gap-3">
+            <Pastille
+              ok={bot.cronSecret}
+              texte={bot.cronSecret ? "CRON_SECRET défini" : "CRON_SECRET absent"}
+            />
+            <Pastille ok={!bot.courtierReel} texte={`Courtier : ${bot.courtierNom}`} />
+            <Pastille
+              ok={!bot.enPause}
+              texte={bot.enPause ? "En pause" : "Actif"}
+            />
+          </div>
+
+          <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+            <div className="flex flex-wrap gap-2">
+              <dt className="text-slate-500">Dernière exécution :</dt>
+              <dd className="font-medium">
+                {bot.derniereExecution
+                  ? `${bot.derniereExecution} (enregistrée le ${bot.derniereExecutionLe})`
+                  : "jamais exécuté"}
+              </dd>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <dt className="text-slate-500">Ordres passés au total :</dt>
+              <dd className="font-medium">{bot.ordresPasses}</dd>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <dt className="text-slate-500">Ordres de la dernière journée :</dt>
+              <dd className="font-medium">{bot.ordresDernierJour}</dd>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <dt className="text-slate-500">Journées exécutées :</dt>
+              <dd className="font-medium">{bot.journeesExecutees}</dd>
+            </div>
+          </dl>
+
+          {bot.dernierResume && (
+            <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-300">
+              Dernier compte rendu : {bot.dernierResume}
+            </p>
+          )}
+
+          <div className="text-sm text-slate-600 dark:text-slate-400">
+            Règles appliquées : achat au-dessus de la moyenne{" "}
+            {bot.moyenneMobileJours} jours, vente en dessous, stop loss à {bot.stopLossPct} %,
+            arrêt de la journée à {euro(bot.perteMaxJourEuros)} de perte.
+            <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+              {bot.actifs.map((a) => (
+                <li key={a.id}>
+                  <span className="font-medium">{a.id}</span>{" "}
+                  {a.actif ? `max ${a.poidsMaxPct} %` : "désactivé"}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <p className="text-xs text-slate-500">
+            Le bot n&apos;appelle aucune intelligence artificielle et aucune API payante : aucune
+            clé n&apos;est nécessaire. Le courtier réel n&apos;existe pas dans ce projet, seule la
+            simulation est implémentée.
+          </p>
         </div>
-        <p className="text-sm text-slate-600 dark:text-slate-400">
-          {trader.cleApi
-            ? "La tâche quotidienne pourra demander une décision au modèle."
-            : "Sans clé d'API, la tâche quotidienne ne passera aucun ordre."}{" "}
-          {trader.cronSecret
-            ? "L'adresse de la tâche est protégée par son secret."
-            : "Sans CRON_SECRET, l'adresse de la tâche est fermée et la tâche ne peut pas s'exécuter."}
-        </p>
-        <p className="text-xs text-slate-500">
-          Aucune valeur de clé n&apos;est affichée ici. Le courtier réel n&apos;existe pas dans ce
-          projet : seule la simulation est implémentée.
-        </p>
-      </div>
+      )}
 
       {/* Accès */}
       <h2 className="mt-10 text-xl font-bold">Mot de passe du site</h2>
@@ -159,7 +220,10 @@ export default async function Page() {
               </div>
               <div className="flex gap-2">
                 <dt className="text-slate-500">Journées reçues :</dt>
-                <dd>{a.jours}</dd>
+                <dd className={a.unAnDHistorique ? "" : "font-medium text-red-700 dark:text-red-400"}>
+                  {a.jours}
+                  {a.unAnDHistorique ? " (plus d'un an)" : " — moins d'un an"}
+                </dd>
               </div>
             </dl>
 

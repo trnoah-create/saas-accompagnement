@@ -11,7 +11,7 @@ export const siteConfig = {
   tagline: "Apprends le trading sans risquer un centime.",
 
   description:
-    "Simulateur de trading à argent fictif : portefeuille virtuel, backtests de stratégies et bot automatique sur Bitcoin, Ethereum, Dogecoin et le S&P 500.",
+    "Simulateur de trading à argent fictif : portefeuille virtuel, backtests de stratégies et bot automatique sur Bitcoin, Ethereum, Solana, le S&P 500 et le Nasdaq 100.",
 
   url: "https://simutrade.vercel.app",
   email: "contact@simutrade.fr",
@@ -27,8 +27,7 @@ export const siteConfig = {
   navPrivee: [
     { label: "Tableau de bord", href: "/tableau-de-bord" },
     { label: "Bot", href: "/bot" },
-    { label: "Claude trader", href: "/claude-trader" },
-    { label: "Bot règles", href: "/bot-regles" },
+    { label: "Bot automatique", href: "/bot-regles" },
   ],
 
   login: { label: "Se connecter", href: "/connexion" },

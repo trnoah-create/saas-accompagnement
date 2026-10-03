@@ -306,10 +306,12 @@ function krakenJSON(n: number): string {
 
   console.log("\nCohérence du catalogue");
 
+  const CATALOGUE = ["BTC", "ETH", "SOL", "SPY", "QQQ"];
+
   await test("chaque actif a au moins deux sources utilisables", () => {
-    for (const id of ["BTC", "ETH", "DOGE", "SPY"]) {
+    for (const id of CATALOGUE) {
       const a = getAsset(id)!;
-      const utilisables = sourcesPour(a).filter((s) => s.url(a, 30) !== null);
+      const utilisables = sourcesPour(a).filter((s) => s.urls(a, 400).length > 0);
       assert.ok(
         utilisables.length >= 2,
         `${id} n'a que ${utilisables.length} source(s) : pas de vrai secours`,
@@ -318,18 +320,121 @@ function krakenJSON(n: number): string {
   });
 
   await test("aucune adresse ne contient de clé ni de secret", () => {
-    for (const id of ["BTC", "ETH", "DOGE", "SPY"]) {
+    for (const id of CATALOGUE) {
       const a = getAsset(id)!;
       for (const s of sourcesPour(a)) {
-        const url = s.url(a, 30);
-        if (!url) continue;
-        assert.ok(
-          !/api[_-]?key|token|secret|password/i.test(url),
-          `${s.id} : l'adresse semble contenir un secret`,
-        );
-        assert.ok(url.startsWith("https://"), `${s.id} : l'adresse doit être en HTTPS`);
+        for (const url of s.urls(a, 400)) {
+          assert.ok(
+            !/api[_-]?key|token|secret|password/i.test(url),
+            `${s.id} : l'adresse semble contenir un secret`,
+          );
+          assert.ok(url.startsWith("https://"), `${s.id} : l'adresse doit être en HTTPS`);
+        }
       }
     }
+  });
+
+  await test("Coinbase découpe un an d'historique en plusieurs appels", () => {
+    const sol = getAsset("SOL")!;
+    const coinbase = sourcesPour(sol).find((s) => s.id === "coinbase")!;
+    // Sous le plafond de 300 journées : un seul appel, sans dates.
+    assert.equal(coinbase.urls(sol, 200).length, 1);
+    assert.ok(!coinbase.urls(sol, 200)[0].includes("start="));
+    // Au-delà : plusieurs appels bornés par des dates.
+    const pages = coinbase.urls(sol, 400);
+    assert.ok(pages.length >= 2, `attendu au moins 2 appels, obtenu ${pages.length}`);
+    for (const u of pages) {
+      assert.ok(u.includes("start=") && u.includes("end="), "chaque page doit être bornée");
+    }
+  });
+
+  await test("plusieurs pages d'une même source sont fusionnées sans doublon", async () => {
+    const sol = getAsset("SOL")!;
+    const coinbase = sourcesPour(sol).find((s) => s.id === "coinbase")!;
+    // Deux pages qui se chevauchent sur une journée.
+    let appel = 0;
+    const f: FetchLike = async () => {
+      appel++;
+      const debut = appel === 1 ? 0 : 299; // la journée 299 est commune
+      const lignes = Array.from({ length: 300 }, (_, i) => {
+        const t = (debut + i) * 86400;
+        return [t, 99, 101, 100, 100, 1];
+      });
+      return { ok: true, status: 200, text: async () => JSON.stringify(lignes) };
+    };
+    assert.ok(coinbase.urls(sol, 400).length >= 2);
+    const recolte = await telecharger(sol, 400, f, [coinbase], 250);
+    const jours = new Set(recolte.bars.map((b) => b.day));
+    assert.equal(jours.size, recolte.bars.length, "aucune journée en double");
+    assert.ok(recolte.bars.length >= 250, `obtenu ${recolte.bars.length} journées`);
+    // Tri croissant garanti.
+    for (let i = 1; i < recolte.bars.length; i++) {
+      assert.ok(recolte.bars[i - 1].day < recolte.bars[i].day, "tri croissant attendu");
+    }
+  });
+
+  await test("une source trop courte est écartée au profit d'une plus fournie", async () => {
+    const spy = getAsset("SPY")!;
+    const courte = sourcesPour(spy)[0];
+    const longue = sourcesPour(spy)[1];
+
+    const f: FetchLike = async (url) => {
+      // Stooq ne renvoie que 30 journées, Yahoo en renvoie 400.
+      const n = url.includes("stooq") ? 30 : 400;
+      if (url.includes("stooq")) {
+        const lignes = ["Date,Open,High,Low,Close,Volume"];
+        for (let i = 0; i < n; i++) {
+          const d = new Date(Date.UTC(2026, 0, 1) + i * 86400000).toISOString().slice(0, 10);
+          lignes.push(`${d},100,101,99,100,1000`);
+        }
+        return { ok: true, status: 200, text: async () => lignes.join("\n") };
+      }
+      const timestamp = Array.from({ length: n }, (_, i) => 1767225600 + i * 86400);
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            chart: {
+              result: [
+                {
+                  timestamp,
+                  indicators: {
+                    quote: [
+                      {
+                        open: timestamp.map(() => 100),
+                        high: timestamp.map(() => 101),
+                        low: timestamp.map(() => 99),
+                        close: timestamp.map(() => 100),
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          }),
+      };
+    };
+
+    const r = await telecharger(spy, 400, f, [courte, longue], 250);
+    assert.equal(r.source, longue.id, "la source trop courte doit être écartée");
+    assert.equal(r.bars.length, 400);
+    assert.equal(r.tentatives[0].ok, false, "la source courte est marquée en échec");
+    assert.match(r.tentatives[0].message, /moins que les 250 attendues/);
+  });
+
+  await test("si aucune source n'atteint le minimum, la plus fournie est gardée et signalée", async () => {
+    const btc = getAsset("BTC")!;
+    const binance = sourcesPour(btc)[0];
+    const f: FetchLike = async () => {
+      const lignes = Array.from({ length: 40 }, (_, i) => [
+        Date.UTC(2026, 0, 1) + i * 86400000, "100", "101", "99", "100",
+      ]);
+      return { ok: true, status: 200, text: async () => JSON.stringify(lignes) };
+    };
+    const r = await telecharger(btc, 400, f, [binance], 250);
+    assert.equal(r.bars.length, 40, "mieux vaut 40 journées que rien");
+    assert.match(r.note ?? "", /Historique court/);
   });
 
   console.log(`\n${reussis} test(s) réussi(s)\n`);

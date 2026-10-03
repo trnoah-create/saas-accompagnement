@@ -25,8 +25,9 @@ function rng(seed: number) {
 const PROFILS: Record<string, { depart: number; derive: number; volatilite: number }> = {
   BTC: { depart: 42000, derive: 0.0012, volatilite: 0.035 },
   ETH: { depart: 2300, derive: 0.0010, volatilite: 0.040 },
-  DOGE: { depart: 0.12, derive: 0.0005, volatilite: 0.060 },
+  SOL: { depart: 140, derive: 0.0014, volatilite: 0.055 },
   SPY: { depart: 450, derive: 0.0004, volatilite: 0.009 },
+  QQQ: { depart: 390, derive: 0.0006, volatilite: 0.012 },
 };
 
 function seedOf(asset: string): number {

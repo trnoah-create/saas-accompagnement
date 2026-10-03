@@ -1,9 +1,10 @@
 /**
- * Tâche quotidienne du bot à règles fixes, appelée par Vercel Cron.
+ * Tâche quotidienne du bot automatique, appelée par Vercel Cron.
  *
- * Aucun appel à une API payante. L'adresse contourne le mot de passe du
- * site (une tâche planifiée ne peut pas se connecter), elle est donc
- * protégée par CRON_SECRET. Sans secret configuré, elle est fermée.
+ * Aucun appel à une intelligence artificielle, aucune API payante.
+ * L'adresse contourne le mot de passe du site (une tâche planifiée ne peut
+ * pas se connecter), elle est donc protégée par CRON_SECRET. Sans secret
+ * configuré, elle est fermée.
  */
 import { NextResponse } from "next/server";
 import { executerJourneeBot } from "@/lib/bot-regles/run";
@@ -32,7 +33,7 @@ async function executer(request: Request) {
       refuses: c.detail.refuses.length,
     });
   } catch (e) {
-    console.error("[bot-regles] échec :", e);
+    console.error("[bot] échec :", e);
     return NextResponse.json({ erreur: "Exécution impossible." }, { status: 500 });
   }
 }

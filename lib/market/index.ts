@@ -8,10 +8,32 @@ import type { Bar, PriceSeries, Tentative } from "./types";
 export * from "./assets";
 export type { Bar, PriceSeries, Tentative } from "./types";
 
-const DEFAULT_DAYS = 400;
+/**
+ * Profondeur d'historique demandée par défaut.
+ *
+ * 400 journées cotées, c'est plus d'un an pour tous les actifs : les
+ * cryptos cotent 7 jours sur 7, les Bourses environ 252 jours par an.
+ */
+export const JOURS_PAR_DEFAUT = 400;
+
+/**
+ * En dessous de ce nombre de journées, on considère ne pas avoir « au
+ * moins un an » d'historique et on essaie la source suivante. 250 journées
+ * cotées correspondent à une année de Bourse.
+ */
+export const MINIMUM_UN_AN = 250;
+
 const CACHE_TTL_MS = 3600_000;
 
-const dernierAppel = new Map<string, number>();
+/**
+ * Dernier téléchargement par actif : l'instant ET la profondeur demandée.
+ *
+ * La profondeur est indispensable. Sans elle, un appel à 30 journées
+ * remplissait le cache avec 30 lignes, et toute demande ultérieure plus
+ * profonde se contentait de ce cache « frais » — c'est exactement pourquoi
+ * le S&P 500 restait bloqué à 30 journées.
+ */
+const dernierAppel = new Map<string, { instant: number; jours: number }>();
 /** Dernières tentatives par actif, pour la page /diagnostic. */
 const dernieresTentatives = new Map<string, Tentative[]>();
 
@@ -90,13 +112,20 @@ async function ecrireCache(asset: string, bars: Bar[], source: string) {
  */
 export async function getPrices(
   assetId: AssetId,
-  days: number = DEFAULT_DAYS,
+  days: number = JOURS_PAR_DEFAUT,
+  minBars: number = Math.min(days, MINIMUM_UN_AN),
 ): Promise<PriceSeries> {
   const asset = getAsset(assetId);
   if (!asset) throw new Error(`Actif inconnu : ${assetId}`);
 
   const cache = await lireCache(assetId, days);
-  const frais = Date.now() - (dernierAppel.get(assetId) ?? 0) < CACHE_TTL_MS;
+  const precedent = dernierAppel.get(assetId);
+  // Le cache n'est réutilisable que s'il est récent ET aussi profond que
+  // la demande : sinon on retélécharge pour compléter l'historique.
+  const frais =
+    precedent !== undefined &&
+    Date.now() - precedent.instant < CACHE_TTL_MS &&
+    precedent.jours >= days;
 
   if (cache.length > 0 && frais) {
     const src = (await sourceDuCache(assetId)) ?? "cache";
@@ -111,9 +140,9 @@ export async function getPrices(
   }
 
   try {
-    const r = await telecharger(asset, days);
+    const r = await telecharger(asset, days, undefined, undefined, minBars);
     dernieresTentatives.set(assetId, r.tentatives);
-    dernierAppel.set(assetId, Date.now());
+    dernierAppel.set(assetId, { instant: Date.now(), jours: days });
     await ecrireCache(assetId, r.bars, r.source);
 
     return {
@@ -149,7 +178,7 @@ export async function getPrices(
     }
 
     const bars = demoBars(assetId, days);
-    dernierAppel.set(assetId, Date.now());
+    dernierAppel.set(assetId, { instant: Date.now(), jours: days });
     await ecrireCache(assetId, bars, "demo");
 
     return {
@@ -163,11 +192,17 @@ export async function getPrices(
   }
 }
 
-/** Dernier prix connu d'un actif. */
+/**
+ * Dernier prix connu d'un actif.
+ *
+ * On demande la profondeur habituelle, pas une tranche courte : tout le
+ * site partage ainsi un seul cache profond, au lieu qu'un appel « juste le
+ * dernier prix » vienne le tronquer.
+ */
 export async function getLastPrice(
   assetId: AssetId,
 ): Promise<{ price: number; source: string }> {
-  const serie = await getPrices(assetId, 30);
+  const serie = await getPrices(assetId);
   const last = serie.bars.at(-1);
   if (!last) throw new Error(`Aucun prix pour ${assetId}`);
   return { price: last.close, source: serie.source };

@@ -1,8 +1,10 @@
 import "server-only";
 import { baseConfiguree, query, urlBase } from "./db";
-import { ASSETS, getPrices, type AssetId, type Tentative } from "./market";
+import { ASSETS, getPrices, MINIMUM_UN_AN, type AssetId, type Tentative } from "./market";
 import { motDePasseConfigure } from "./session";
 import { courtier } from "./broker";
+import { botReglesConfig } from "../config/bot-regles";
+import { etatExecutionBot, type EtatExecutionBot } from "./bot-regles/run";
 
 export type EtatBase = {
   configuree: boolean;
@@ -26,20 +28,42 @@ export function etatAcces(): EtatAcces {
       };
 }
 
-export type EtatClaudeTrader = {
-  cleApi: boolean;
+/**
+ * État du bot automatique.
+ *
+ * Aucune clé d'API n'y figure : le bot est 100 % mécanique, il n'appelle
+ * aucun service payant. Seuls comptent la tâche quotidienne (CRON_SECRET),
+ * le courtier utilisé, et ce que le bot a réellement fait.
+ */
+export type EtatBotAuto = {
+  /** La tâche quotidienne est-elle protégée (et donc utilisable) ? */
   cronSecret: boolean;
   courtierNom: string;
   courtierReel: boolean;
-};
+  /** Actifs suivis et part maximale autorisée pour chacun. */
+  actifs: { id: string; poidsMaxPct: number; actif: boolean }[];
+  moyenneMobileJours: number;
+  stopLossPct: number;
+  perteMaxJourEuros: number;
+} & EtatExecutionBot;
 
-export function etatClaudeTrader(): EtatClaudeTrader {
+export async function etatBotAuto(): Promise<EtatBotAuto> {
   const broker = courtier();
+  const execution = await etatExecutionBot();
+
   return {
-    cleApi: Boolean(process.env.ANTHROPIC_API_KEY),
     cronSecret: Boolean(process.env.CRON_SECRET),
     courtierNom: broker.nom,
     courtierReel: broker.reel,
+    actifs: botReglesConfig.actifs.map((a) => ({
+      id: a.id,
+      poidsMaxPct: a.poidsMaxPct,
+      actif: a.actif,
+    })),
+    moyenneMobileJours: botReglesConfig.moyenneMobileJours,
+    stopLossPct: botReglesConfig.sorties.stopLossPct,
+    perteMaxJourEuros: botReglesConfig.pertes.blocageJour,
+    ...execution,
   };
 }
 
@@ -53,6 +77,8 @@ export type EtatActif = {
   dernierPrix: number | null;
   derniereDate: string | null;
   jours: number;
+  /** true si on a bien au moins un an d'historique. */
+  unAnDHistorique: boolean;
   tentatives: Tentative[];
 };
 
@@ -92,7 +118,9 @@ export async function etatActifs(): Promise<EtatActif[]> {
   return Promise.all(
     ASSETS.map(async (a) => {
       try {
-        const serie = await getPrices(a.id as AssetId, 30);
+        // Profondeur habituelle, pas une tranche courte : la page doit
+        // montrer l'historique réellement disponible.
+        const serie = await getPrices(a.id as AssetId);
         const dernier = serie.bars.at(-1);
         return {
           id: a.id,
@@ -104,6 +132,7 @@ export async function etatActifs(): Promise<EtatActif[]> {
           dernierPrix: dernier?.close ?? null,
           derniereDate: dernier?.day ?? null,
           jours: serie.bars.length,
+          unAnDHistorique: serie.bars.length >= MINIMUM_UN_AN,
           tentatives: serie.tentatives,
         };
       } catch (e) {
@@ -116,6 +145,7 @@ export async function etatActifs(): Promise<EtatActif[]> {
           dernierPrix: null,
           derniereDate: null,
           jours: 0,
+          unAnDHistorique: false,
           tentatives: [],
         };
       }

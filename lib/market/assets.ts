@@ -1,4 +1,4 @@
-export type AssetId = "BTC" | "ETH" | "DOGE" | "SPY";
+export type AssetId = "BTC" | "ETH" | "SOL" | "SPY" | "QQQ";
 
 /**
  * Symbole de l'actif chez chaque fournisseur. Une clé absente signifie que
@@ -19,6 +19,11 @@ export type Asset = {
   label: string;
   kind: "crypto" | "indice";
   symboles: Symboles;
+  /**
+   * Sources à essayer EN PREMIER pour cet actif, avant l'ordre habituel de
+   * son type. Le reste de l'ordre de secours est conservé derrière.
+   */
+  sourcesPrioritaires?: string[];
 };
 
 export const ASSETS: Asset[] = [
@@ -45,15 +50,17 @@ export const ASSETS: Asset[] = [
     },
   },
   {
-    id: "DOGE",
-    label: "Dogecoin",
+    id: "SOL",
+    // Seul actif coté directement en euros : la paire SOL-EUR de Coinbase.
+    label: "Solana (SOL-EUR)",
     kind: "crypto",
+    // Coinbase d'abord, comme demandé ; les autres restent en secours.
+    sourcesPrioritaires: ["coinbase"],
     symboles: {
-      binance: "DOGEUSDT",
-      coinbase: "DOGE-USD",
-      // Chez Kraken, le Dogecoin s'appelle XDG.
-      kraken: "XDGUSD",
-      coingecko: "dogecoin",
+      coinbase: "SOL-EUR",
+      binance: "SOLUSDT",
+      kraken: "SOLUSD",
+      coingecko: "solana",
     },
   },
   {
@@ -66,6 +73,17 @@ export const ASSETS: Asset[] = [
       // FRED publie l'INDICE S&P 500, pas l'ETF SPY : niveau de prix
       // différent, évolution comparable. Signalé dans l'interface.
       fred: "SP500",
+    },
+  },
+  {
+    id: "QQQ",
+    label: "Nasdaq 100 (QQQ)",
+    kind: "indice",
+    symboles: {
+      stooq: "qqq.us",
+      yahoo: "QQQ",
+      // Idem : FRED publie l'indice Nasdaq 100, pas l'ETF QQQ.
+      fred: "NASDAQ100",
     },
   },
 ];

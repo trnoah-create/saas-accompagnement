@@ -1,10 +1,24 @@
 /**
- * Tests du bot à règles fixes. Aucun réseau, aucune base, aucun appel payant.
+ * Tests du bot automatique. Aucun réseau, aucune base, aucun appel payant.
+ *
+ * Trois choses sont vérifiées ici :
+ *   1. les règles elles-mêmes (moyenne mobile, stop loss, plafonds) ;
+ *   2. les limites de perte en euros ;
+ *   3. la séparation entre les règles et le courtier, par lecture du code.
  */
 import assert from "node:assert/strict";
-import { deciderOrdres, type Historiques } from "../lib/bot-regles/decider";
-import { jourDeLExperience } from "../lib/limites";
-import { botReglesConfig as cfg } from "../config/bot-regles";
+import { readFileSync } from "node:fs";
+import {
+  deciderOrdres,
+  signalMoyenneMobile,
+  type EtatBot,
+  type Historiques,
+  type ReglesBot,
+} from "../lib/bot-regles/decider";
+import { evaluerLimites, jourDeLExperience, jourLocal } from "../lib/limites";
+import { botReglesConfig as cfg, poidsMaxPct, idsActifs } from "../config/bot-regles";
+import { ASSETS, ASSET_IDS, getAsset } from "../lib/market/assets";
+import { sourcesPour } from "../lib/market/sources";
 import type { Bar } from "../lib/market/types";
 
 let reussis = 0;
@@ -19,7 +33,9 @@ function test(nom: string, fn: () => void) {
   }
 }
 
-/** Série de clôtures → bougies. */
+// ─── Fabriques d'historiques ─────────────────────────────────────────
+
+/** Série de clôtures → bougies journalières. */
 function serie(closes: number[]): Bar[] {
   return closes.map((c, i) => {
     const d = new Date(Date.UTC(2026, 0, 1) + i * 86400000).toISOString().slice(0, 10);
@@ -27,262 +43,481 @@ function serie(closes: number[]): Bar[] {
   });
 }
 
-/** Historique produisant un croisement HAUSSIER (courte au-dessus de la longue). */
-function haussier(prixFinal: number): Bar[] {
+/**
+ * Historique dont la dernière clôture CONNUE est au-dessus de sa moyenne
+ * 50 jours : 60 jours plats à 100, puis une montée. `prixDuJour` est la
+ * bougie du jour en cours, que les règles doivent ignorer.
+ */
+function auDessus(prixDuJour = 130): Bar[] {
   const plat = Array.from({ length: 60 }, () => 100);
-  const monte = Array.from({ length: 30 }, (_, i) => 100 + i * 2);
-  return serie([...plat, ...monte, prixFinal]);
+  const monte = Array.from({ length: 20 }, (_, i) => 100 + (i + 1) * 2);
+  return serie([...plat, ...monte, prixDuJour]);
 }
 
-/** Historique produisant un signal BAISSIER (courte sous la longue). */
-function baissier(prixFinal: number): Bar[] {
+/** Historique dont la dernière clôture connue est SOUS sa moyenne 50 jours. */
+function enDessous(prixDuJour = 70): Bar[] {
   const plat = Array.from({ length: 60 }, () => 100);
-  const baisse = Array.from({ length: 30 }, (_, i) => 100 - i * 2);
-  return serie([...plat, ...baisse, prixFinal]);
+  const baisse = Array.from({ length: 20 }, (_, i) => 100 - (i + 1) * 2);
+  return serie([...plat, ...baisse, prixDuJour]);
 }
 
-const histo = (btc: Bar[], eth: Bar[]): Historiques => ({ BTC: btc, ETH: eth });
+/** Historique trop court pour une moyenne 50 jours. */
+function tropCourt(): Bar[] {
+  return serie(Array.from({ length: 20 }, (_, i) => 100 + i));
+}
 
-console.log("\nSignaux d'entrée et de sortie");
+// ─── Configurations de test ──────────────────────────────────────────
 
-test("croisement haussier sans position → achat", () => {
-  const p = deciderOrdres(
-    { cash: 100, positions: [] },
-    histo(haussier(160), baissier(50)),
-    { BTC: 160, ETH: 50 },
-  );
-  const achats = p.ordres.filter((o) => o.side === "buy");
-  assert.equal(achats.length, 1, JSON.stringify(p));
-  assert.equal(achats[0].asset, "BTC");
-  assert.match(achats[0].raison, /haussier/);
+const REGLES_BASE: ReglesBot = {
+  actifs: [
+    { id: "BTC", poidsMaxPct: 25, actif: true },
+    { id: "SOL", poidsMaxPct: 10, actif: true },
+  ],
+  moyenneMobileJours: 50,
+  ordres: { minEuros: 2, maxParJour: 5 },
+  quantiteMinimale: { BTC: 0.0001, SOL: 0.01 },
+  sorties: { stopLossPct: 5 },
+  couts: { fraisPct: 0.1, ecartPct: 0.1 },
+};
+
+function regles(patch: Partial<ReglesBot> = {}): ReglesBot {
+  return { ...REGLES_BASE, ...patch };
+}
+
+/** Portefeuille : liquide, valeur totale, positions. */
+function etat(cash: number, positions: EtatBot["positions"] = [], valeurTotale = cash): EtatBot {
+  return { cash, valeurTotale, positions };
+}
+
+console.log("\nSignal « prix contre moyenne mobile »");
+
+test("une clôture au-dessus de la moyenne 50 jours donne le signal haussier", () => {
+  const s = signalMoyenneMobile(auDessus(), 50);
+  assert.ok(s, "un signal doit être calculable");
+  assert.equal(s.position, "au-dessus");
+  assert.ok(s.cloture > s.moyenne, "la clôture doit dépasser la moyenne");
 });
 
-test("croisement baissier sans position → rien", () => {
-  const p = deciderOrdres(
-    { cash: 100, positions: [] },
-    histo(baissier(50), baissier(50)),
-    { BTC: 50, ETH: 50 },
-  );
-  assert.equal(p.ordres.length, 0);
+test("une clôture sous la moyenne 50 jours donne le signal baissier", () => {
+  const s = signalMoyenneMobile(enDessous(), 50);
+  assert.ok(s);
+  assert.equal(s.position, "en-dessous");
+  assert.ok(s.cloture < s.moyenne);
 });
 
-test("croisement baissier avec position → vente", () => {
-  const p = deciderOrdres(
-    { cash: 0, positions: [{ asset: "BTC", quantity: 0.001, prixEntree: 50 }] },
-    histo(baissier(50.5), baissier(50)),
-    { BTC: 50.5, ETH: 50 },
-  );
-  assert.equal(p.ordres.length, 1);
-  assert.equal(p.ordres[0].side, "sell");
-  assert.match(p.ordres[0].raison, /baissier/);
+test("moins de 50 journées closes : aucun signal, jamais de supposition", () => {
+  assert.equal(signalMoyenneMobile(tropCourt(), 50), null);
+  // Exactement 50 journées closes (51 bougies) : le signal devient calculable.
+  assert.equal(signalMoyenneMobile(serie(Array.from({ length: 50 }, () => 100)), 50), null);
+  assert.ok(signalMoyenneMobile(serie(Array.from({ length: 51 }, (_, i) => 100 + i)), 50));
 });
 
-console.log("\nStop loss et take profit");
-
-test("stop loss : −2 % déclenche la vente", () => {
-  // Entrée à 100, prix à 98 → exactement −2 %.
-  const p = deciderOrdres(
-    { cash: 0, positions: [{ asset: "BTC", quantity: 0.01, prixEntree: 100 }] },
-    histo(haussier(98), baissier(50)),
-    { BTC: 98, ETH: 50 },
-  );
-  assert.equal(p.ordres.length, 1);
-  assert.equal(p.ordres[0].side, "sell");
-  assert.match(p.ordres[0].raison, /Stop loss/);
+test("anti-triche : la bougie du jour en cours n'entre pas dans la décision", () => {
+  // Deux historiques identiques, sauf le prix du jour en cours.
+  const a = signalMoyenneMobile(auDessus(130), 50);
+  const b = signalMoyenneMobile(auDessus(1), 50);
+  assert.deepEqual(a, b, "le prix du jour ne doit pas changer le signal");
 });
 
-test("stop loss : −1,9 % ne déclenche pas", () => {
-  const p = deciderOrdres(
-    { cash: 0, positions: [{ asset: "BTC", quantity: 0.01, prixEntree: 100 }] },
-    histo(haussier(98.1), baissier(50)),
-    { BTC: 98.1, ETH: 50 },
-  );
-  assert.equal(p.ordres.length, 0, JSON.stringify(p.ordres));
-  assert.match(p.signaux.BTC, /Conservé/);
-});
+console.log("\nAchats");
 
-test("take profit : +4 % déclenche la vente", () => {
-  const p = deciderOrdres(
-    { cash: 0, positions: [{ asset: "BTC", quantity: 0.01, prixEntree: 100 }] },
-    histo(haussier(104), baissier(50)),
-    { BTC: 104, ETH: 50 },
-  );
-  assert.equal(p.ordres.length, 1);
-  assert.match(p.ordres[0].raison, /Take profit/);
-});
-
-test("take profit : +3,9 % ne déclenche pas", () => {
-  const p = deciderOrdres(
-    { cash: 0, positions: [{ asset: "BTC", quantity: 0.01, prixEntree: 100 }] },
-    histo(haussier(103.9), baissier(50)),
-    { BTC: 103.9, ETH: 50 },
-  );
-  assert.equal(p.ordres.length, 0);
-});
-
-test("le stop loss prime sur le signal de tendance", () => {
-  // Tendance haussière mais position en perte de 3 % : on sort quand même.
-  const p = deciderOrdres(
-    { cash: 0, positions: [{ asset: "BTC", quantity: 0.01, prixEntree: 100 }] },
-    histo(haussier(97), baissier(50)),
-    { BTC: 97, ETH: 50 },
-  );
-  assert.equal(p.ordres.length, 1);
-  assert.match(p.ordres[0].raison, /Stop loss/);
-});
-
-console.log("\nTaille des ordres");
-
-test("l'ordre vise le montant configuré", () => {
-  const p = deciderOrdres(
-    { cash: 100, positions: [] },
-    histo(haussier(160), baissier(50)),
-    { BTC: 160, ETH: 50 },
-  );
-  assert.ok(Math.abs(p.ordres[0].montant - cfg.ordres.cible) < 1e-9, `montant ${p.ordres[0].montant}`);
-});
-
-test("jamais au-dessus du maximum", () => {
-  const p = deciderOrdres(
-    { cash: 100, positions: [] },
-    histo(haussier(160), baissier(50)),
-    { BTC: 160, ETH: 50 },
-  );
-  for (const o of p.ordres.filter((x) => x.side === "buy")) {
-    assert.ok(o.montant <= cfg.ordres.maxEuros + 1e-9, `montant ${o.montant}`);
-  }
-});
-
-test("liquidités trop faibles → refus plutôt qu'ordre minuscule", () => {
-  const p = deciderOrdres(
-    { cash: 1, positions: [] },
-    histo(haussier(160), baissier(50)),
-    { BTC: 160, ETH: 50 },
-  );
-  assert.equal(p.ordres.length, 0);
-  assert.match(p.refus[0].motifRefus, /minimum/);
-});
-
-console.log("\nQuantité minimale négociable");
-
-test("le montant est relevé pour atteindre la quantité minimale de BTC", () => {
-  // BTC à 70 000 € : 0,0001 BTC = 7 €, au-dessus de la cible de 6 €.
-  const p = deciderOrdres(
-    { cash: 100, positions: [] },
-    histo(haussier(70_000), baissier(50)),
-    { BTC: 70_000, ETH: 50 },
-  );
+test("prix au-dessus de la moyenne : le bot achète", () => {
+  const p = deciderOrdres(etat(100), { BTC: auDessus() }, { BTC: 130 }, regles());
   const achat = p.ordres.find((o) => o.asset === "BTC");
-  assert.ok(achat, "aucun achat BTC");
-  assert.ok(achat!.montant >= 7, `montant ${achat!.montant} : devrait couvrir 0,0001 BTC`);
-  assert.ok(achat!.montant <= cfg.ordres.maxEuros + 1e-9);
+  assert.ok(achat, "un achat de BTC est attendu");
+  assert.equal(achat.side, "buy");
+  assert.match(achat.raison, /au-dessus de sa moyenne 50 jours/);
 });
 
-test("si la quantité minimale coûte plus que le plafond, l'ordre est refusé", () => {
-  // BTC à 200 000 € : 0,0001 BTC = 20 €, au-dessus du plafond de 9 €.
-  const p = deciderOrdres(
-    { cash: 100, positions: [] },
-    histo(haussier(200_000), baissier(50)),
-    { BTC: 200_000, ETH: 50 },
-  );
-  assert.equal(p.ordres.filter((o) => o.asset === "BTC").length, 0);
-  const refus = p.refus.find((r) => r.asset === "BTC");
-  assert.ok(refus, "refus attendu");
-  assert.match(refus!.motifRefus, /Quantité minimale/);
-});
-
-test("liquidités insuffisantes pour la quantité minimale → refus explicite", () => {
-  // BTC à 70 000 € : il faut 7 €, on n'a que 5 €.
-  const p = deciderOrdres(
-    { cash: 5, positions: [] },
-    histo(haussier(70_000), baissier(50)),
-    { BTC: 70_000, ETH: 50 },
-  );
+test("prix sous la moyenne : aucun achat", () => {
+  const p = deciderOrdres(etat(100), { BTC: enDessous() }, { BTC: 70 }, regles());
   assert.equal(p.ordres.length, 0);
-  assert.match(p.refus[0].motifRefus, /quantité minimale|minimum/i);
+  assert.match(p.signaux.BTC, /Hors marché/);
 });
 
-console.log("\nGarde-fous");
-
-test("le bot ne touche qu'aux actifs configurés", () => {
-  const p = deciderOrdres(
-    { cash: 100, positions: [] },
-    { ...histo(haussier(160), haussier(160)), DOGE: haussier(1), SPY: haussier(600) },
-    { BTC: 160, ETH: 160, DOGE: 1, SPY: 600 },
-  );
-  for (const o of p.ordres) {
-    assert.ok(cfg.actifs.includes(o.asset as never), `actif hors périmètre : ${o.asset}`);
-  }
-});
-
-test("le plafond d'ordres par jour est respecté", () => {
-  const court = { ...cfg, ordres: { ...cfg.ordres, maxParJour: 1 } };
-  const p = deciderOrdres(
-    { cash: 100, positions: [] },
-    histo(haussier(160), haussier(160)),
-    { BTC: 160, ETH: 160 },
-    court,
-  );
-  assert.equal(p.ordres.length, 1);
-  assert.ok(p.refus.some((r) => /ordres par jour/.test(r.motifRefus)));
-});
-
-test("aucune vente à découvert : sans position, aucun ordre de vente", () => {
-  const p = deciderOrdres(
-    { cash: 100, positions: [] },
-    histo(baissier(50), baissier(50)),
-    { BTC: 50, ETH: 50 },
-  );
-  assert.equal(p.ordres.filter((o) => o.side === "sell").length, 0);
-});
-
-test("l'argent n'est pas engagé deux fois", () => {
-  // 7 € de liquide, deux signaux haussiers : le second doit être limité.
-  const p = deciderOrdres(
-    { cash: 7, positions: [] },
-    histo(haussier(160), haussier(160)),
-    { BTC: 160, ETH: 160 },
-  );
-  const total = p.ordres
-    .filter((o) => o.side === "buy")
-    .reduce((s, o) => s + o.montant * (1 + cfg.couts.fraisPct / 100), 0);
-  assert.ok(total <= 7 + 1e-9, `engagé ${total} € pour 7 € disponibles`);
-});
-
-test("un historique trop court ne déclenche rien", () => {
-  const p = deciderOrdres(
-    { cash: 100, positions: [] },
-    histo(serie([100, 101, 102]), serie([100, 101, 102])),
-    { BTC: 102, ETH: 102 },
-  );
+test("historique trop court : aucun ordre, et le motif est explicite", () => {
+  const p = deciderOrdres(etat(100), { BTC: tropCourt() }, { BTC: 110 }, regles());
   assert.equal(p.ordres.length, 0);
+  assert.match(p.signaux.BTC, /historique trop court/);
 });
 
-test("un prix manquant est signalé sans planter", () => {
-  const p = deciderOrdres(
-    { cash: 100, positions: [] },
-    histo(haussier(160), baissier(50)),
-    { BTC: 0, ETH: 50 },
-  );
+test("prix ou historique manquant : aucun ordre", () => {
+  const p = deciderOrdres(etat(100), {}, {}, regles());
   assert.equal(p.ordres.length, 0);
   assert.match(p.signaux.BTC, /indisponible/);
 });
 
-console.log("\nDurée de l'expérience");
+console.log("\nPlafond par actif");
 
-test("le premier jour est le jour 1", () => {
-  assert.equal(jourDeLExperience("2026-10-03", "2026-10-03"), 1);
+test("au maximum 25 % du portefeuille sur un actif", () => {
+  const p = deciderOrdres(etat(100), { BTC: auDessus() }, { BTC: 130 }, regles());
+  const achat = p.ordres.find((o) => o.asset === "BTC");
+  assert.ok(achat);
+  assert.ok(
+    Math.abs(achat.montant - 25) < 1e-6,
+    `25 € attendus sur un portefeuille de 100 €, obtenu ${achat.montant}`,
+  );
 });
 
-test("le décompte suit les journées", () => {
-  assert.equal(jourDeLExperience("2026-10-03", "2026-10-04"), 2);
-  assert.equal(jourDeLExperience("2026-10-03", "2026-12-01"), 60);
+test("Solana est plafonnée à 10 % du portefeuille", () => {
+  const p = deciderOrdres(
+    etat(100),
+    { BTC: enDessous(), SOL: auDessus() },
+    { BTC: 70, SOL: 130 },
+    regles(),
+  );
+  const achat = p.ordres.find((o) => o.asset === "SOL");
+  assert.ok(achat, "un achat de SOL est attendu");
+  assert.ok(
+    Math.abs(achat.montant - 10) < 1e-6,
+    `10 € attendus, obtenu ${achat.montant}`,
+  );
 });
 
-test("deux mois correspondent à la durée configurée", () => {
-  assert.equal(cfg.dureeJours, 60);
-  // Au 61e jour, l'expérience est terminée.
-  assert.ok(jourDeLExperience("2026-10-03", "2026-12-02") > cfg.dureeJours);
+test("le plafond suit la valeur totale, pas seulement le liquide", () => {
+  // 40 € de liquide, 160 € investis ailleurs → total 200 € → plafond 50 €.
+  const e = etat(40, [{ asset: "SOL", quantity: 1, prixEntree: 160 }], 200);
+  const p = deciderOrdres(
+    e,
+    { BTC: auDessus(), SOL: auDessus() },
+    { BTC: 130, SOL: 160 },
+    regles(),
+  );
+  const achat = p.ordres.find((o) => o.asset === "BTC");
+  assert.ok(achat);
+  // Le plafond vaut 50 €, mais le liquide ne permet que ~39,96 €.
+  assert.ok(achat.montant < 40 && achat.montant > 39, `obtenu ${achat.montant}`);
 });
 
-console.log(`\n${reussis} test(s) réussi(s)\n`);
+test("plafond de 0 % : aucun achat", () => {
+  const p = deciderOrdres(
+    etat(100),
+    { BTC: auDessus() },
+    { BTC: 130 },
+    regles({ actifs: [{ id: "BTC", poidsMaxPct: 0, actif: true }] }),
+  );
+  assert.equal(p.ordres.length, 0);
+  assert.match(p.signaux.BTC, /plafond de 0 %/);
+});
+
+console.log("\nVentes et stop loss");
+
+test("le prix repasse sous la moyenne : la position est vendue", () => {
+  const e = etat(0, [{ asset: "BTC", quantity: 1, prixEntree: 70 }], 70);
+  const p = deciderOrdres(e, { BTC: enDessous() }, { BTC: 70 }, regles());
+  const vente = p.ordres.find((o) => o.asset === "BTC");
+  assert.ok(vente);
+  assert.equal(vente.side, "sell");
+  assert.match(vente.raison, /repassé sous sa moyenne 50 jours/);
+});
+
+test("stop loss : une perte de plus de 5 % déclenche la vente", () => {
+  // Entrée à 100, prix à 94 → −6 %, alors que la moyenne reste favorable.
+  const e = etat(0, [{ asset: "BTC", quantity: 1, prixEntree: 100 }], 94);
+  const p = deciderOrdres(e, { BTC: auDessus(94) }, { BTC: 94 }, regles());
+  const vente = p.ordres.find((o) => o.asset === "BTC");
+  assert.ok(vente, "le stop loss doit vendre même si la moyenne est favorable");
+  assert.equal(vente.side, "sell");
+  assert.match(vente.raison, /Stop loss/);
+});
+
+test("une perte inférieure au stop loss ne déclenche rien", () => {
+  // Entrée à 100, prix à 97 → −3 %, au-dessus du seuil de −5 %.
+  const e = etat(0, [{ asset: "BTC", quantity: 1, prixEntree: 100 }], 97);
+  const p = deciderOrdres(e, { BTC: auDessus(97) }, { BTC: 97 }, regles());
+  assert.equal(p.ordres.length, 0);
+  assert.match(p.signaux.BTC, /Conservé/);
+});
+
+test("le stop loss est prioritaire sur le signal de moyenne mobile", () => {
+  const e = etat(0, [{ asset: "BTC", quantity: 1, prixEntree: 100 }], 70);
+  const p = deciderOrdres(e, { BTC: enDessous(70) }, { BTC: 70 }, regles());
+  const vente = p.ordres[0];
+  assert.ok(vente);
+  assert.match(vente.raison, /Stop loss/, "le motif doit être le stop loss");
+});
+
+test("une position en gain au-dessus de sa moyenne est conservée", () => {
+  const e = etat(0, [{ asset: "BTC", quantity: 1, prixEntree: 100 }], 130);
+  const p = deciderOrdres(e, { BTC: auDessus(130) }, { BTC: 130 }, regles());
+  assert.equal(p.ordres.length, 0, "aucun take profit : on laisse courir le gain");
+  assert.match(p.signaux.BTC, /Conservé/);
+});
+
+test("pas de rachat d'un actif déjà détenu", () => {
+  const e = etat(100, [{ asset: "BTC", quantity: 1, prixEntree: 125 }], 225);
+  const p = deciderOrdres(e, { BTC: auDessus(130) }, { BTC: 130 }, regles());
+  assert.equal(p.ordres.filter((o) => o.side === "buy").length, 0);
+});
+
+console.log("\nDésactivation d'un actif");
+
+test("un actif désactivé n'est plus acheté", () => {
+  const p = deciderOrdres(
+    etat(100),
+    { SOL: auDessus() },
+    { SOL: 130 },
+    regles({ actifs: [{ id: "SOL", poidsMaxPct: 10, actif: false }] }),
+  );
+  assert.equal(p.ordres.length, 0);
+  assert.match(p.signaux.SOL, /désactivé/);
+});
+
+test("une position ouverte sur un actif désactivé reste vendable", () => {
+  const e = etat(0, [{ asset: "SOL", quantity: 1, prixEntree: 100 }], 70);
+  const p = deciderOrdres(
+    e,
+    { SOL: enDessous(70) },
+    { SOL: 70 },
+    regles({ actifs: [{ id: "SOL", poidsMaxPct: 10, actif: false }] }),
+  );
+  assert.equal(p.ordres.length, 1);
+  assert.equal(p.ordres[0].side, "sell");
+});
+
+test("une position sur un actif absent de la configuration reste vendable", () => {
+  // Cas d'un actif retiré de la liste alors qu'une position est ouverte.
+  const e = etat(0, [{ asset: "DOGE", quantity: 1, prixEntree: 100 }], 70);
+  const p = deciderOrdres(e, { DOGE: enDessous(70) }, { DOGE: 70 }, regles());
+  const vente = p.ordres.find((o) => o.asset === "DOGE");
+  assert.ok(vente, "la position orpheline doit pouvoir être soldée");
+  assert.equal(vente.side, "sell");
+});
+
+console.log("\nGarde-fous sur la taille des ordres");
+
+test("plafond d'ordres par jour respecté", () => {
+  const actifs = [
+    { id: "BTC", poidsMaxPct: 25, actif: true },
+    { id: "ETH", poidsMaxPct: 25, actif: true },
+    { id: "SPY", poidsMaxPct: 25, actif: true },
+  ];
+  const p = deciderOrdres(
+    etat(100),
+    { BTC: auDessus(), ETH: auDessus(), SPY: auDessus() },
+    { BTC: 130, ETH: 130, SPY: 130 },
+    regles({ actifs, ordres: { minEuros: 2, maxParJour: 2 } }),
+  );
+  assert.equal(p.ordres.length, 2, "jamais plus de 2 ordres");
+  assert.equal(p.refus.length, 1);
+  assert.match(p.refus[0].motifRefus, /Plafond de 2 ordres par jour/);
+});
+
+test("liquidités insuffisantes : le montant est réduit, frais compris", () => {
+  // Portefeuille de 100 € dont 95 € déjà investis en SOL : le plafond BTC
+  // vaut 25 €, mais il ne reste que 5 € de liquide.
+  const e = etat(5, [{ asset: "SOL", quantity: 1, prixEntree: 95 }], 100);
+  const p = deciderOrdres(
+    e,
+    { BTC: auDessus(), SOL: auDessus(95) },
+    { BTC: 130, SOL: 95 },
+    regles(),
+  );
+  const achat = p.ordres.find((o) => o.asset === "BTC" && o.side === "buy");
+  assert.ok(achat, "un achat réduit de BTC est attendu");
+  assert.ok(achat.montant <= 5, "l'ordre ne peut pas dépasser le liquide");
+  assert.ok(
+    achat.montant + achat.montant * 0.001 <= 5 + 1e-9,
+    "frais compris, le coût doit tenir dans le liquide",
+  );
+});
+
+test("montant possible sous le minimum : ordre refusé", () => {
+  const p = deciderOrdres(etat(1), { BTC: auDessus() }, { BTC: 130 }, regles());
+  assert.equal(p.ordres.length, 0);
+  assert.match(p.refus[0].motifRefus, /en dessous du minimum/);
+});
+
+test("quantité minimale inatteignable sous le plafond : ordre refusé", () => {
+  // 1 unité minimale à 130 € alors que le plafond vaut 25 €.
+  const p = deciderOrdres(
+    etat(100),
+    { BTC: auDessus() },
+    { BTC: 130 },
+    regles({ quantiteMinimale: { BTC: 1 } }),
+  );
+  assert.equal(p.ordres.length, 0);
+  assert.match(p.refus[0].motifRefus, /au-dessus du plafond/);
+});
+
+test("un refus de vente n'invente jamais un motif d'achat", () => {
+  const actifs = [
+    { id: "BTC", poidsMaxPct: 25, actif: true },
+    { id: "SOL", poidsMaxPct: 10, actif: true },
+  ];
+  const e = etat(
+    0,
+    [
+      { asset: "BTC", quantity: 1, prixEntree: 100 },
+      { asset: "SOL", quantity: 1, prixEntree: 100 },
+    ],
+    140,
+  );
+  const p = deciderOrdres(
+    e,
+    { BTC: enDessous(70), SOL: enDessous(70) },
+    { BTC: 70, SOL: 70 },
+    regles({ actifs, ordres: { minEuros: 2, maxParJour: 1 } }),
+  );
+  assert.equal(p.ordres.length, 1);
+  assert.equal(p.refus.length, 1);
+  assert.equal(p.refus[0].side, "sell");
+});
+
+console.log("\nLimites de perte en euros");
+
+const SEUILS = { pertes: cfg.pertes };
+
+test("sous le seuil d'alerte : le bot continue", () => {
+  const d = evaluerLimites(99.5, { jour: 100, semaine: 100, mois: 100 }, SEUILS);
+  assert.equal(d.action, "continuer");
+});
+
+test(`perte du jour de ${cfg.pertes.alerteJour} € : alerte sans blocage`, () => {
+  const d = evaluerLimites(100 - cfg.pertes.alerteJour, { jour: 100, semaine: 100, mois: 100 }, SEUILS);
+  assert.equal(d.action, "alerte");
+});
+
+test(`perte du jour de ${cfg.pertes.blocageJour} € : le bot s'arrête pour la journée`, () => {
+  const d = evaluerLimites(100 - cfg.pertes.blocageJour, { jour: 100, semaine: 100, mois: 100 }, SEUILS);
+  assert.equal(d.action, "bloquer_jour");
+  assert.match(d.motif, /Aucun ordre jusqu'à demain/);
+});
+
+test("perte hebdomadaire dépassée : mise en pause", () => {
+  const d = evaluerLimites(100 - cfg.pertes.semaine, { jour: 100, semaine: 100, mois: 100 }, SEUILS);
+  assert.equal(d.action, "pause");
+});
+
+test("perte mensuelle dépassée : mise en pause, priorité la plus forte", () => {
+  const d = evaluerLimites(100 - cfg.pertes.mois, { jour: 100, semaine: 100, mois: 100 }, SEUILS);
+  assert.equal(d.action, "pause");
+  assert.match(d.motif, /mensuelle/);
+});
+
+test("premier jour sans historique de valeurs : aucune limite déclenchée", () => {
+  const d = evaluerLimites(100, { jour: null, semaine: null, mois: null }, SEUILS);
+  assert.equal(d.action, "continuer");
+});
+
+test("les journées sont découpées à l'heure de Paris", () => {
+  // 23 h 30 UTC le 3 octobre = déjà le 4 octobre à Paris.
+  assert.equal(jourLocal(new Date("2026-10-03T23:30:00Z"), "Europe/Paris"), "2026-10-04");
+  assert.equal(jourDeLExperience("2026-10-01", "2026-10-01"), 1);
+  assert.equal(jourDeLExperience("2026-10-01", "2026-10-10"), 10);
+});
+
+console.log("\nConfiguration demandée");
+
+test("les cinq actifs attendus, sans Dogecoin", () => {
+  assert.deepEqual([...ASSET_IDS].sort(), ["BTC", "ETH", "QQQ", "SOL", "SPY"]);
+  assert.equal(getAsset("DOGE"), undefined, "Dogecoin doit avoir disparu");
+});
+
+test("Solana est cotée en euros chez Coinbase, essayé en premier", () => {
+  const sol = getAsset("SOL");
+  assert.ok(sol);
+  assert.equal(sol.symboles.coinbase, "SOL-EUR");
+  assert.equal(sourcesPour(sol)[0].id, "coinbase");
+});
+
+test("l'ordre de secours habituel est conservé derrière la source prioritaire", () => {
+  const sol = getAsset("SOL");
+  const btc = getAsset("BTC");
+  assert.ok(sol && btc);
+  // BTC garde l'ordre par défaut.
+  assert.deepEqual(
+    sourcesPour(btc).map((s) => s.id),
+    ["binance", "coinbase", "kraken", "coingecko"],
+  );
+  // SOL remonte Coinbase, sans perdre les autres ni en changer l'ordre.
+  assert.deepEqual(
+    sourcesPour(sol).map((s) => s.id),
+    ["coinbase", "binance", "kraken", "coingecko"],
+  );
+});
+
+test("chaque actif a au moins deux sources de secours", () => {
+  for (const a of ASSETS) {
+    const utilisables = sourcesPour(a).filter((s) => s.urls(a, 400).length > 0);
+    assert.ok(
+      utilisables.length >= 2,
+      `${a.id} n'a que ${utilisables.length} source(s) utilisable(s)`,
+    );
+  }
+});
+
+test("les plafonds demandés : 25 % par actif, 10 % pour Solana", () => {
+  assert.equal(poidsMaxPct("SOL"), 10);
+  for (const id of ["BTC", "ETH", "SPY", "QQQ"]) {
+    assert.equal(poidsMaxPct(id), 25, `${id} doit être plafonné à 25 %`);
+  }
+});
+
+test("stop loss d'environ 5 %, limite quotidienne entre 1 et 3 €", () => {
+  assert.equal(cfg.sorties.stopLossPct, 5);
+  assert.ok(
+    cfg.pertes.blocageJour >= 1 && cfg.pertes.blocageJour <= 3,
+    `limite quotidienne de ${cfg.pertes.blocageJour} €, attendue entre 1 et 3 €`,
+  );
+  assert.ok(cfg.pertes.alerteJour <= cfg.pertes.blocageJour);
+});
+
+test("moyenne mobile de 50 jours et plus d'un an d'historique demandé", () => {
+  assert.equal(cfg.moyenneMobileJours, 50);
+  assert.ok(cfg.historique.minimum >= 250, "au moins un an de Bourse");
+  assert.ok(cfg.historique.jours >= cfg.historique.minimum);
+});
+
+test("tous les actifs suivis existent dans le catalogue de prix", () => {
+  for (const id of idsActifs()) {
+    assert.ok(getAsset(id), `${id} n'est pas un actif connu`);
+    assert.ok(cfg.quantiteMinimale[id] > 0, `${id} n'a pas de quantité minimale`);
+  }
+});
+
+console.log("\nSéparation des règles et du courtier");
+
+const SOURCE_REGLES = readFileSync(new URL("../lib/bot-regles/decider.ts", import.meta.url), "utf8");
+const SOURCE_COURTIER = readFileSync(new URL("../lib/broker/types.ts", import.meta.url), "utf8");
+
+test("les règles n'importent ni courtier, ni base, ni réseau", () => {
+  // On inspecte les lignes d'import, pas les commentaires.
+  const imports = SOURCE_REGLES.split("\n").filter((l) => /^\s*import\b/.test(l));
+  assert.ok(imports.length > 0, "le fichier doit bien avoir des imports");
+
+  for (const ligne of imports) {
+    for (const interdit of ["broker", "courtier", "/db", "server-only", "simule"]) {
+      assert.ok(
+        !ligne.includes(interdit),
+        `decider.ts ne doit pas importer « ${interdit} » : ${ligne.trim()}`,
+      );
+    }
+  }
+  assert.ok(!SOURCE_REGLES.includes("fetch("), "aucun appel réseau dans les règles");
+});
+
+test("l'interface courtier expose bien acheter, vendre, solde et positions", () => {
+  for (const methode of ["acheter(", "vendre(", "solde(", "positions("]) {
+    assert.ok(SOURCE_COURTIER.includes(methode), `l'interface doit déclarer ${methode})`);
+  }
+  assert.ok(SOURCE_COURTIER.includes("readonly reel: false"), "le courtier reste non réel");
+});
+
+test("aucun appel à une API d'intelligence artificielle dans le projet", () => {
+  for (const f of [
+    "../lib/bot-regles/decider.ts",
+    "../lib/bot-regles/run.ts",
+    "../lib/broker/simule.ts",
+    "../lib/broker/index.ts",
+    "../lib/health.ts",
+    "../config/bot-regles.ts",
+  ]) {
+    const src = readFileSync(new URL(f, import.meta.url), "utf8");
+    for (const interdit of ["anthropic", "ANTHROPIC_API_KEY", "openai"]) {
+      assert.ok(!src.toLowerCase().includes(interdit.toLowerCase()), `${f} mentionne ${interdit}`);
+    }
+  }
+});
+
+console.log(`\n${reussis} test(s) réussi(s).`);

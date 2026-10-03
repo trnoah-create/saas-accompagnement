@@ -125,25 +125,25 @@ async function creerSchema() {
   const bilan = await migrerDepuisMultiComptes(run);
   if (bilan.migre) console.info("[base] migration vers le propriétaire unique :", bilan.detail);
 
-  await alignerCapitalClaude(run);
+  await alignerCapitalBot(run);
 }
 
 /**
- * Aligne le capital de départ du mode « Claude trader » sur la valeur
- * configurée, tant qu'aucun ordre n'a été passé. Dès qu'un historique
- * existe, on n'y touche plus : on ne réécrit jamais un passé réel.
+ * Aligne le capital de départ du bot sur la valeur configurée, tant
+ * qu'aucun ordre n'a été passé. Dès qu'un historique existe, on n'y touche
+ * plus : on ne réécrit jamais un passé réel.
  */
-async function alignerCapitalClaude(run: Runner): Promise<void> {
-  const { claudeTraderConfig } = await import("../config/claude-trader");
-  const capital = claudeTraderConfig.capitalDepart;
+async function alignerCapitalBot(run: Runner): Promise<void> {
+  const { botReglesConfig } = await import("../config/bot-regles");
+  const capital = botReglesConfig.capitalDepart;
 
-  const ordres = await run("SELECT 1 FROM claude_orders LIMIT 1", []);
+  const ordres = await run("SELECT 1 FROM bot_orders LIMIT 1", []);
   if (ordres.length > 0) return;
 
   await run(
-    `INSERT INTO claude_portfolio (id, cash, start_capital) VALUES (1, $1, $1)
+    `INSERT INTO bot_portfolio (id, cash, start_capital) VALUES (1, $1, $1)
      ON CONFLICT (id) DO UPDATE SET cash = $1, start_capital = $1
-     WHERE claude_portfolio.start_capital <> $1`,
+     WHERE bot_portfolio.start_capital <> $1`,
     [capital],
   );
 }
@@ -240,55 +240,7 @@ const SCHEMA: string[] = [
      enabled        integer NOT NULL DEFAULT 0,
      stopped_reason text
    )`,
-  // ─── Mode « Claude trader » : portefeuille distinct du tien ───────
-  `CREATE TABLE IF NOT EXISTS claude_portfolio (
-     id            smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-     cash          double precision NOT NULL,
-     start_capital double precision NOT NULL,
-     started_on    date NOT NULL DEFAULT CURRENT_DATE,
-     paused        integer NOT NULL DEFAULT 0
-   )`,
-  `CREATE TABLE IF NOT EXISTS claude_positions (
-     asset    text PRIMARY KEY,
-     quantity double precision NOT NULL
-   )`,
-  `CREATE TABLE IF NOT EXISTS claude_orders (
-     id         integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-     day        date NOT NULL DEFAULT CURRENT_DATE,
-     asset      text NOT NULL,
-     side       text NOT NULL CHECK (side IN ('buy','sell')),
-     quantity   double precision NOT NULL,
-     price      double precision NOT NULL,
-     fee        double precision NOT NULL,
-     reason     text NOT NULL DEFAULT '',
-     created_at timestamptz NOT NULL DEFAULT now()
-   )`,
-  // Portefeuille témoin « acheter et garder », figé au premier jour.
-  `CREATE TABLE IF NOT EXISTS claude_benchmark (
-     asset    text PRIMARY KEY,
-     quantity double precision NOT NULL
-   )`,
-  // Valeur du portefeuille par journée (heure de Paris) : sert à mesurer
-  // les pertes du jour, de la semaine et du mois.
-  `CREATE TABLE IF NOT EXISTS claude_equity (
-     day         date PRIMARY KEY,
-     open_value  double precision NOT NULL,
-     close_value double precision NOT NULL
-   )`,
-  // Un compte rendu par jour.
-  `CREATE TABLE IF NOT EXISTS claude_reports (
-     day              date PRIMARY KEY,
-     statut           text NOT NULL,
-     valeur           double precision,
-     gain_jour_pct    double precision,
-     valeur_temoin    double precision,
-     temoin_gain_pct  double precision,
-     resume           text NOT NULL DEFAULT '',
-     detail           text NOT NULL DEFAULT '{}',
-     erreur           text,
-     created_at       timestamptz NOT NULL DEFAULT now()
-   )`,
-  // ─── Bot à règles fixes : portefeuille encore distinct ────────────
+  // ─── Bot automatique : portefeuille distinct du tien ─────────────
   `CREATE TABLE IF NOT EXISTS bot_portfolio (
      id            smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
      cash          double precision NOT NULL,
@@ -296,7 +248,7 @@ const SCHEMA: string[] = [
      started_on    date NOT NULL DEFAULT CURRENT_DATE,
      paused        integer NOT NULL DEFAULT 0
    )`,
-  // prix_entree : prix moyen d'achat, nécessaire au stop loss et au take profit.
+  // prix_entree : prix moyen d'achat, nécessaire au stop loss.
   `CREATE TABLE IF NOT EXISTS bot_positions (
      asset       text PRIMARY KEY,
      quantity    double precision NOT NULL,

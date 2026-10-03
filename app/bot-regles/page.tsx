@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
-import { historiqueBot, botEnPause, jourDeLExperience } from "@/lib/bot-regles/run";
-import { etatBot } from "@/lib/bot-regles/courtier";
-import { botReglesConfig as cfg } from "@/config/bot-regles";
+import { historiqueBot, botEnPause, etatBot, jourDeLExperience } from "@/lib/bot-regles/run";
+import { botReglesConfig as cfg, actifsActifs } from "@/config/bot-regles";
 import { BotPause } from "@/components/bot-pause";
 import { DisclaimerNote } from "@/components/disclaimer";
 import { LineChart } from "@/components/chart";
@@ -9,7 +8,7 @@ import { CHART_COLORS } from "@/lib/colors";
 import { euro, prix, pourcent, quantite } from "@/lib/format";
 import { jourLocal } from "@/lib/limites";
 
-export const metadata: Metadata = { title: "Bot règles" };
+export const metadata: Metadata = { title: "Bot automatique" };
 export const dynamic = "force-dynamic";
 
 const LIBELLES: Record<string, { texte: string; classe: string }> = {
@@ -18,7 +17,6 @@ const LIBELLES: Record<string, { texte: string; classe: string }> = {
   en_pause: { texte: "En pause", classe: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300" },
   blocage_jour: { texte: "Blocage du jour", classe: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300" },
   pause_auto: { texte: "Pause automatique", classe: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300" },
-  termine: { texte: "Expérience terminée", classe: "bg-slate-200 text-slate-800 dark:bg-slate-700 dark:text-slate-200" },
 };
 
 function Limite({ label, valeur, seuil }: { label: string; valeur: number | null; seuil: number }) {
@@ -39,8 +37,8 @@ export default async function Page() {
   const etat = await etatBot();
 
   const aujourdhui = jourLocal(new Date(), cfg.fuseau);
-  const numeroJour = jourDeLExperience(etat.demarreLe, aujourdhui);
-  const restants = Math.max(cfg.dureeJours - numeroJour + 1, 0);
+  const numeroJour = jourDeLExperience(etat.depuisLe, aujourdhui);
+  const suivis = actifsActifs();
 
   const dernier = comptes[0];
   const chrono = [...comptes].reverse();
@@ -49,18 +47,29 @@ export default async function Page() {
 
   return (
     <div className="container-page py-10">
-      <h1 className="text-3xl font-bold tracking-tight">Bot à règles fixes</h1>
+      <h1 className="text-3xl font-bold tracking-tight">Bot automatique</h1>
       <p className="mt-2 max-w-2xl text-slate-600 dark:text-slate-400">
-        Croisement de moyennes mobiles {cfg.strategie.courte} et {cfg.strategie.longue} jours sur{" "}
-        {cfg.actifs.join(" et ")}. Aucune intelligence artificielle, aucun appel payant : les règles
-        sont appliquées mécaniquement.
+        Règle unique : le bot achète un actif dont le prix clôture au-dessus de sa moyenne des{" "}
+        {cfg.moyenneMobileJours} derniers jours, et le vend dès qu&apos;il repasse en dessous.
+        Aucune intelligence artificielle, aucun appel payant : les règles sont appliquées
+        mécaniquement.
+      </p>
+      <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+        Actifs suivis :{" "}
+        {suivis.map((a) => `${a.id} (max ${a.poidsMaxPct} %)`).join(" · ")}
+        {suivis.length < cfg.actifs.length && (
+          <>
+            {" "}· désactivés :{" "}
+            {cfg.actifs.filter((a) => !a.actif).map((a) => a.id).join(", ")}
+          </>
+        )}
       </p>
 
       <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50 p-5 dark:border-amber-900 dark:bg-amber-950/40">
         <h2 className="font-semibold text-amber-900 dark:text-amber-200">Argent 100 % fictif</h2>
         <p className="mt-2 text-sm leading-relaxed text-amber-900 dark:text-amber-200">
-          Portefeuille simulé, séparé de ton portefeuille manuel et de celui du mode Claude trader.
-          Aucun courtier n&apos;est contacté, aucun ordre réel n&apos;est passé.
+          Portefeuille simulé, séparé de ton portefeuille manuel. Aucun courtier n&apos;est
+          contacté, aucun ordre réel n&apos;est passé.
         </p>
         <DisclaimerNote className="mt-3 text-amber-800 dark:text-amber-300" />
       </div>
@@ -68,20 +77,20 @@ export default async function Page() {
       <div className="mt-6 flex flex-wrap items-center gap-4">
         <BotPause enPause={pause} />
         <span className="text-sm text-slate-600 dark:text-slate-400">
-          État : <strong>{pause ? "en pause" : numeroJour > cfg.dureeJours ? "terminé" : "actif"}</strong>
+          État : <strong>{pause ? "en pause" : "actif"}</strong>
         </span>
       </div>
 
       {/* Avancement de l'expérience */}
       <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {[
-          { l: "Jour de l'expérience", v: `${Math.min(numeroJour, cfg.dureeJours)} / ${cfg.dureeJours}` },
-          { l: "Jours restants", v: String(restants) },
-          { l: "Valeur du portefeuille", v: euro(etat.totalValue) },
+          { l: "Jours depuis le départ", v: String(Math.max(numeroJour, 1)) },
+          { l: "Liquidités", v: euro(etat.cash) },
+          { l: "Valeur du portefeuille", v: euro(etat.valeurTotale) },
           {
             l: "Depuis le départ",
-            v: pourcent(((etat.totalValue - etat.startCapital) / etat.startCapital) * 100),
-            t: etat.totalValue >= etat.startCapital
+            v: pourcent(((etat.valeurTotale - etat.capitalDepart) / etat.capitalDepart) * 100),
+            t: etat.valeurTotale >= etat.capitalDepart
               ? "text-emerald-600 dark:text-emerald-400"
               : "text-red-600 dark:text-red-400",
           },
@@ -93,9 +102,9 @@ export default async function Page() {
         ))}
       </div>
       <p className="mt-3 text-xs text-slate-500">
-        Démarré le {etat.demarreLe} · capital {euro(cfg.capitalDepart)} · ordres de{" "}
-        {euro(cfg.ordres.minEuros)} à {euro(cfg.ordres.maxEuros)} · stop loss{" "}
-        {cfg.sorties.stopLossPct} % · take profit {cfg.sorties.takeProfitPct} % · frais{" "}
+        Démarré le {etat.depuisLe} · capital {euro(cfg.capitalDepart)} · moyenne mobile{" "}
+        {cfg.moyenneMobileJours} jours · stop loss {cfg.sorties.stopLossPct} % · au plus{" "}
+        {cfg.ordres.maxParJour} ordres par jour, minimum {euro(cfg.ordres.minEuros)} · frais{" "}
         {cfg.couts.fraisPct} % et écart achat/vente {cfg.couts.ecartPct} %
       </p>
 
@@ -103,13 +112,16 @@ export default async function Page() {
       <h2 className="mt-10 text-xl font-bold">Les limites de perte</h2>
       <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Limite label="Perte du jour (alerte)" valeur={dernier?.detail?.pertes?.jour ?? null} seuil={cfg.pertes.alerteJour} />
-        <Limite label="Perte du jour (blocage)" valeur={dernier?.detail?.pertes?.jour ?? null} seuil={cfg.pertes.blocageJour} />
+        <Limite label="Perte du jour (arrêt)" valeur={dernier?.detail?.pertes?.jour ?? null} seuil={cfg.pertes.blocageJour} />
         <Limite label="Perte de la semaine" valeur={dernier?.detail?.pertes?.semaine ?? null} seuil={cfg.pertes.semaine} />
         <Limite label="Perte du mois" valeur={dernier?.detail?.pertes?.mois ?? null} seuil={cfg.pertes.mois} />
       </div>
       <p className="mt-3 text-xs text-slate-500">
-        Journées de minuit à minuit, heure de {cfg.fuseau.replace("Europe/", "")}. Au-delà de la
-        limite hebdomadaire ou mensuelle, le bot se met en pause et attend ta réactivation.
+        Journées de minuit à minuit, heure de {cfg.fuseau.replace("Europe/", "")}. La limite
+        quotidienne de {euro(cfg.pertes.blocageJour)} arrête le bot jusqu&apos;au lendemain ;
+        au-delà de la limite hebdomadaire ou mensuelle, il se met en pause et attend ta
+        réactivation. Ces montants sont écrits dans le code, pas dans une variable
+        d&apos;environnement.
       </p>
 
       {/* Positions ouvertes */}
@@ -125,24 +137,23 @@ export default async function Page() {
                   <th className="px-4 py-3 font-semibold">Prix d&apos;entrée</th>
                   <th className="px-4 py-3 font-semibold">Prix actuel</th>
                   <th className="px-4 py-3 font-semibold">Écart</th>
-                  <th className="px-4 py-3 font-semibold">Stop / objectif</th>
+                  <th className="px-4 py-3 font-semibold">Stop loss</th>
                 </tr>
               </thead>
               <tbody>
                 {etat.positions.map((p) => {
-                  const variation = ((p.price - p.prixEntree) / p.prixEntree) * 100;
+                  const variation = ((p.prix - p.prixEntree) / p.prixEntree) * 100;
                   return (
                     <tr key={p.asset} className="border-t border-slate-200 dark:border-slate-800">
                       <td className="px-4 py-3 font-medium">{p.asset}</td>
                       <td className="px-4 py-3">{quantite(p.quantity)}</td>
                       <td className="px-4 py-3">{prix(p.prixEntree)}</td>
-                      <td className="px-4 py-3">{prix(p.price)}</td>
+                      <td className="px-4 py-3">{prix(p.prix)}</td>
                       <td className={`px-4 py-3 font-semibold ${variation >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
                         {pourcent(variation)}
                       </td>
                       <td className="px-4 py-3 text-slate-500">
-                        {prix(p.prixEntree * (1 - cfg.sorties.stopLossPct / 100))} /{" "}
-                        {prix(p.prixEntree * (1 + cfg.sorties.takeProfitPct / 100))}
+                        {prix(p.prixEntree * (1 - cfg.sorties.stopLossPct / 100))}
                       </td>
                     </tr>
                   );
@@ -164,7 +175,7 @@ export default async function Page() {
           <LineChart
             height={280}
             series={[
-              { points: courbeBot, color: CHART_COLORS[0], label: "Bot à règles fixes" },
+              { points: courbeBot, color: CHART_COLORS[0], label: "Bot automatique" },
               { points: courbeTemoin, color: CHART_COLORS[2], label: "Acheter et garder" },
               { points: [], color: CHART_COLORS[4], label: "Portefeuille manuel (pas encore suivi)" },
             ]}
@@ -193,7 +204,7 @@ export default async function Page() {
                     {c.day}
                     {c.detail.jourDeLExperience && (
                       <span className="ml-2 text-xs font-normal text-slate-500">
-                        jour {c.detail.jourDeLExperience} / {cfg.dureeJours}
+                        jour {c.detail.jourDeLExperience}
                       </span>
                     )}
                   </h3>

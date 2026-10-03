@@ -1,13 +1,20 @@
 /**
- * Exécution quotidienne du bot à règles fixes.
+ * Exécution quotidienne du bot — l'orchestration.
  *
- * Aucun appel à une API payante : la décision est purement mécanique.
- * Enchaînement : état → durée de l'expérience → limites de perte →
- * décision → exécution via le courtier simulé → compte rendu.
+ * Ce fichier est le seul endroit où les deux mondes se rencontrent :
+ *   • les RÈGLES (decider.ts) : fonctions pures, elles décident ;
+ *   • le COURTIER (lib/broker) : quatre opérations, il exécute.
+ *
+ * Aucun appel à une intelligence artificielle, aucune API payante.
+ *
+ * Enchaînement d'une journée :
+ *   pause → solde et positions → prix et historiques → témoin →
+ *   limites de perte → décision → exécution → compte rendu.
  */
 import "server-only";
 import { query, queryOne } from "../db";
-import { botReglesConfig as cfg, fraisBot } from "../../config/bot-regles";
+import { botReglesConfig as cfg, fraisBot, idsActifs } from "../../config/bot-regles";
+import { courtier, etatDuCompte, type EtatCompte, type OrdreExecute } from "../broker";
 import { getPrices, type AssetId } from "../market";
 import type { Bar } from "../market/types";
 import {
@@ -19,7 +26,6 @@ import {
   type Pertes,
 } from "../limites";
 import { deciderOrdres, type Historiques, type Prix, type RefusBot } from "./decider";
-import { etatBot, passerOrdreBot, COURTIER_REEL, type OrdreExecuteBot } from "./courtier";
 
 export { jourDeLExperience };
 
@@ -28,8 +34,7 @@ export type StatutBot =
   | "aucun_ordre"
   | "en_pause"
   | "blocage_jour"
-  | "pause_auto"
-  | "termine";
+  | "pause_auto";
 
 export type CompteBot = {
   day: string;
@@ -40,15 +45,24 @@ export type CompteBot = {
   temoin_gain_pct: number | null;
   resume: string;
   detail: {
-    executes: OrdreExecuteBot[];
+    executes: OrdreExecute[];
     refuses: RefusBot[];
     signaux?: Record<string, string>;
     pertes?: Pertes;
     alerte?: string;
     jourDeLExperience?: number;
+    /** Profondeur d'historique obtenue par actif, pour vérifier le « 1 an ». */
+    historiques?: Record<string, number>;
   };
   erreur: string | null;
 };
+
+// ─── État du compte, vu à travers l'interface courtier ───────────────
+
+/** Solde + positions + valeur totale, assemblés depuis le courtier. */
+export async function etatBot(): Promise<EtatCompte> {
+  return etatDuCompte(courtier());
+}
 
 // ─── Pause ───────────────────────────────────────────────────────────
 
@@ -97,9 +111,12 @@ async function valeurTemoin(prix: Prix): Promise<number> {
   );
 
   if (existantes.length === 0) {
-    const part = cfg.capitalDepart / cfg.actifs.length;
+    const ids = idsActifs();
+    if (ids.length === 0) return cfg.capitalDepart;
+
+    const part = cfg.capitalDepart / ids.length;
     const investi = part - fraisBot(part);
-    for (const a of cfg.actifs) {
+    for (const a of ids) {
       const p = prix[a];
       if (!p) continue;
       await query(
@@ -108,7 +125,7 @@ async function valeurTemoin(prix: Prix): Promise<number> {
         [a, investi / p],
       );
     }
-    return cfg.actifs.reduce((t, a) => (prix[a] ? t + investi : t), 0);
+    return ids.reduce((t, a) => (prix[a] ? t + investi : t), 0);
   }
 
   return existantes.reduce((t, b) => t + Number(b.quantity) * (prix[b.asset] ?? 0), 0);
@@ -136,7 +153,9 @@ async function enregistrer(c: CompteBot): Promise<void> {
 // ─── Exécution d'une journée ─────────────────────────────────────────
 
 export async function executerJourneeBot(maintenant = new Date()): Promise<CompteBot> {
-  if (COURTIER_REEL) throw new Error("Courtier réel détecté : exécution refusée.");
+  const broker = courtier();
+  // Ceinture et bretelles : aucune exécution si un courtier réel apparaissait.
+  if (broker.reel) throw new Error("Courtier réel détecté : exécution refusée.");
 
   const jour = jourLocal(maintenant, cfg.fuseau);
   const base: Omit<CompteBot, "statut" | "resume"> = {
@@ -150,25 +169,44 @@ export async function executerJourneeBot(maintenant = new Date()): Promise<Compt
   };
 
   if (await botEnPause()) {
-    const c: CompteBot = { ...base, statut: "en_pause", resume: "Le bot est en pause : aucun ordre passé." };
+    const c: CompteBot = {
+      ...base,
+      statut: "en_pause",
+      resume: "Le bot est en pause : aucun ordre passé.",
+    };
     await enregistrer(c);
     return c;
   }
 
   const etat = await etatBot();
-  const numeroJour = jourDeLExperience(etat.demarreLe, jour);
+  const numeroJour = jourDeLExperience(etat.depuisLe, jour);
 
-  // Prix et historiques des actifs suivis.
+  // Prix et historiques des actifs suivis (au moins un an de profondeur).
   const prix: Prix = {};
   const historiques: Historiques = {};
-  for (const a of cfg.actifs) {
-    const { bars } = await getPrices(a as AssetId, 200);
+  const profondeurs: Record<string, number> = {};
+  for (const a of idsActifs()) {
+    const { bars } = await getPrices(a as AssetId, cfg.historique.jours, cfg.historique.minimum);
     historiques[a] = bars as Bar[];
+    profondeurs[a] = bars.length;
     prix[a] = bars.at(-1)?.close ?? 0;
+  }
+  // Les positions encore ouvertes sur un actif désactivé doivent aussi
+  // être valorisées, sinon le bot ne pourrait plus les vendre.
+  for (const p of etat.positions) {
+    if (prix[p.asset] !== undefined) continue;
+    const { bars } = await getPrices(
+      p.asset as AssetId,
+      cfg.historique.jours,
+      cfg.historique.minimum,
+    );
+    historiques[p.asset] = bars as Bar[];
+    profondeurs[p.asset] = bars.length;
+    prix[p.asset] = bars.at(-1)?.close ?? 0;
   }
 
   const temoin = await valeurTemoin(prix);
-  const ouvertures = await suivreValeur(jour, etat.totalValue);
+  const ouvertures = await suivreValeur(jour, etat.valeurTotale);
 
   const chiffres = (valeur: number) => ({
     valeur,
@@ -180,30 +218,23 @@ export async function executerJourneeBot(maintenant = new Date()): Promise<Compt
     temoin_gain_pct: ((temoin - cfg.capitalDepart) / cfg.capitalDepart) * 100,
   });
 
-  // ── Fin de l'expérience ──
-  if (numeroJour > cfg.dureeJours) {
-    const c: CompteBot = {
-      ...base,
-      ...chiffres(etat.totalValue),
-      statut: "termine",
-      resume: `Expérience terminée : ${cfg.dureeJours} jours écoulés depuis le ${etat.demarreLe}. Le bot ne passe plus d'ordre.`,
-      detail: { executes: [], refuses: [], jourDeLExperience: numeroJour },
-    };
-    await enregistrer(c);
-    return c;
-  }
-
   // ── Limites de perte ──
-  const limites = evaluerLimites(etat.totalValue, ouvertures, cfg);
+  const limites = evaluerLimites(etat.valeurTotale, ouvertures, cfg);
 
   if (limites.action === "pause") {
     await mettreBotEnPause(true);
     const c: CompteBot = {
       ...base,
-      ...chiffres(etat.totalValue),
+      ...chiffres(etat.valeurTotale),
       statut: "pause_auto",
       resume: limites.motif,
-      detail: { executes: [], refuses: [], pertes: limites.pertes, jourDeLExperience: numeroJour },
+      detail: {
+        executes: [],
+        refuses: [],
+        pertes: limites.pertes,
+        jourDeLExperience: numeroJour,
+        historiques: profondeurs,
+      },
     };
     await enregistrer(c);
     return c;
@@ -212,10 +243,16 @@ export async function executerJourneeBot(maintenant = new Date()): Promise<Compt
   if (limites.action === "bloquer_jour") {
     const c: CompteBot = {
       ...base,
-      ...chiffres(etat.totalValue),
+      ...chiffres(etat.valeurTotale),
       statut: "blocage_jour",
       resume: limites.motif,
-      detail: { executes: [], refuses: [], pertes: limites.pertes, jourDeLExperience: numeroJour },
+      detail: {
+        executes: [],
+        refuses: [],
+        pertes: limites.pertes,
+        jourDeLExperience: numeroJour,
+        historiques: profondeurs,
+      },
     };
     await enregistrer(c);
     return c;
@@ -223,19 +260,22 @@ export async function executerJourneeBot(maintenant = new Date()): Promise<Compt
 
   const alerte = limites.action === "alerte" ? limites.motif : undefined;
 
-  // ── Décision mécanique, puis exécution ──
+  // ── Décision mécanique (règles pures), puis exécution (courtier) ──
   const plan = deciderOrdres(
-    { cash: etat.cash, positions: etat.positions },
+    { cash: etat.cash, valeurTotale: etat.valeurTotale, positions: etat.positions },
     historiques,
     prix,
   );
 
-  const executes: OrdreExecuteBot[] = [];
+  const executes: OrdreExecute[] = [];
   const refuses: RefusBot[] = [...plan.refus];
 
   for (const o of plan.ordres) {
+    const demande = { asset: o.asset, montant: o.montant, raison: o.raison };
     try {
-      executes.push(await passerOrdreBot({ ...o, raison: o.raison }));
+      executes.push(
+        o.side === "buy" ? await broker.acheter(demande) : await broker.vendre(demande),
+      );
     } catch (e) {
       refuses.push({
         asset: o.asset,
@@ -248,7 +288,7 @@ export async function executerJourneeBot(maintenant = new Date()): Promise<Compt
   }
 
   const apres = await etatBot();
-  await suivreValeur(jour, apres.totalValue);
+  await suivreValeur(jour, apres.valeurTotale);
 
   const resume =
     executes.length === 0
@@ -260,7 +300,7 @@ export async function executerJourneeBot(maintenant = new Date()): Promise<Compt
 
   const c: CompteBot = {
     ...base,
-    ...chiffres(apres.totalValue),
+    ...chiffres(apres.valeurTotale),
     statut: executes.length > 0 ? "ordres" : "aucun_ordre",
     resume,
     detail: {
@@ -270,6 +310,7 @@ export async function executerJourneeBot(maintenant = new Date()): Promise<Compt
       pertes: limites.pertes,
       alerte,
       jourDeLExperience: numeroJour,
+      historiques: profondeurs,
     },
   };
   await enregistrer(c);
@@ -310,4 +351,57 @@ function parseDetail(v: unknown): CompteBot["detail"] {
   } catch {
     return { executes: [], refuses: [] };
   }
+}
+
+// ─── État du bot pour la page /diagnostic ────────────────────────────
+
+export type EtatExecutionBot = {
+  /** Date de la dernière journée exécutée, ou null si jamais lancé. */
+  derniereExecution: string | null;
+  /** Horodatage précis de cette exécution. */
+  derniereExecutionLe: string | null;
+  /** Statut de cette dernière journée. */
+  dernierStatut: StatutBot | null;
+  /** Résumé de cette dernière journée. */
+  dernierResume: string | null;
+  /** Nombre total d'ordres passés depuis le départ. */
+  ordresPasses: number;
+  /** Ordres passés lors de la dernière journée. */
+  ordresDernierJour: number;
+  /** Nombre de journées exécutées. */
+  journeesExecutees: number;
+  enPause: boolean;
+};
+
+export async function etatExecutionBot(): Promise<EtatExecutionBot> {
+  const dernier = await queryOne<{
+    day: string;
+    statut: string;
+    resume: string;
+    created_at: string;
+  }>(
+    `SELECT to_char(day, 'YYYY-MM-DD') AS day, statut, resume,
+            to_char(created_at, 'YYYY-MM-DD HH24:MI') AS created_at
+     FROM bot_reports ORDER BY day DESC LIMIT 1`,
+  );
+
+  const total = await queryOne<{ n: number }>("SELECT count(*)::int AS n FROM bot_orders");
+  const journees = await queryOne<{ n: number }>("SELECT count(*)::int AS n FROM bot_reports");
+  const duJour = dernier
+    ? await queryOne<{ n: number }>(
+        "SELECT count(*)::int AS n FROM bot_orders WHERE day = $1",
+        [dernier.day],
+      )
+    : undefined;
+
+  return {
+    derniereExecution: dernier ? String(dernier.day) : null,
+    derniereExecutionLe: dernier ? String(dernier.created_at) : null,
+    dernierStatut: dernier ? (dernier.statut as StatutBot) : null,
+    dernierResume: dernier ? String(dernier.resume) : null,
+    ordresPasses: Number(total?.n ?? 0),
+    ordresDernierJour: Number(duJour?.n ?? 0),
+    journeesExecutees: Number(journees?.n ?? 0),
+    enPause: await botEnPause(),
+  };
 }
